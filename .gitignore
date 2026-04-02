@@ -33,6 +33,11 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# SQLite database (Railway uses a persistent volume)
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal
+
 # vercel
 .vercel
 

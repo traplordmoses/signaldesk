@@ -1,0 +1,159 @@
+import Parser from 'rss-parser'
+import { createHash } from 'crypto'
+import { db } from '@/lib/db'
+import { newsSources, newsItems, auditLog } from '@/lib/db/schema'
+import { eq, gt, and } from 'drizzle-orm'
+import { scoreItem, detectRisk } from './scorer'
+
+const parser = new Parser({ timeout: 10000 })
+
+function sha256(str: string): string {
+  return createHash('sha256').update(str).digest('hex')
+}
+
+function titleWords(title: string): string {
+  return title.toLowerCase().split(/\s+/).slice(0, 8).join(' ')
+}
+
+interface NormalizedItem {
+  id: string
+  title: string
+  summary: string
+  url: string
+  urlHash: string
+  titleHash: string
+  sourceId: string
+  sourceName: string
+  category: string
+  publishedAt: number
+}
+
+async function fetchSource(source: typeof newsSources.$inferSelect): Promise<{ items: NormalizedItem[]; error?: string }> {
+  try {
+    const feed = await parser.parseURL(source.url)
+    const items: NormalizedItem[] = []
+
+    for (const entry of feed.items ?? []) {
+      const url = entry.link ?? entry.guid ?? ''
+      if (!url) continue
+
+      const title = entry.title ?? ''
+      const summary = entry.contentSnippet ?? entry.summary ?? entry.content ?? ''
+      const publishedAt = entry.pubDate ? new Date(entry.pubDate).getTime() : Date.now()
+
+      items.push({
+        id: crypto.randomUUID(),
+        title,
+        summary: summary.slice(0, 500),
+        url,
+        urlHash: sha256(url),
+        titleHash: sha256(titleWords(title)),
+        sourceId: source.id,
+        sourceName: source.name,
+        category: source.category,
+        publishedAt,
+      })
+    }
+
+    return { items }
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err)
+    return { items: [], error }
+  }
+}
+
+export async function fetchAllSources(): Promise<{ ingested: number; errors: number }> {
+  const sources = db.select().from(newsSources).where(eq(newsSources.isActive, 1)).all()
+
+  let ingested = 0
+  let errors = 0
+
+  const results = await Promise.allSettled(sources.map(s => fetchSource(s)))
+
+  for (let i = 0; i < results.length; i++) {
+    const source = sources[i]
+    const result = results[i]
+
+    if (result.status === 'rejected' || result.value.error) {
+      errors++
+      const errMsg = result.status === 'rejected' ? String(result.reason) : result.value.error!
+      // Update source error
+      db.update(newsSources)
+        .set({ lastError: errMsg, lastFetchedAt: Date.now() })
+        .where(eq(newsSources.id, source.id))
+        .run()
+
+      try {
+        db.insert(auditLog).values({
+          id: crypto.randomUUID(),
+          eventType: 'error',
+          entityType: 'news_source',
+          entityId: source.id,
+          errorCode: 'FETCH_FAILED',
+          errorMessage: errMsg,
+          details: JSON.stringify({ sourceUrl: source.url }),
+          createdAt: Date.now(),
+        }).run()
+      } catch {}
+      continue
+    }
+
+    const { items } = result.value
+    const weight = source.weight ?? 5
+    const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000
+
+    for (const item of items) {
+      try {
+        // Check url_hash dedup
+        const existing = db.select({ id: newsItems.id })
+          .from(newsItems)
+          .where(eq(newsItems.urlHash, item.urlHash))
+          .get()
+        if (existing) continue
+
+        // Check title_hash near-dedup (last 4 hours)
+        const recentTitle = db.select({ id: newsItems.id })
+          .from(newsItems)
+          .where(
+            and(
+              eq(newsItems.titleHash, item.titleHash),
+              gt(newsItems.ingestedAt, fourHoursAgo)
+            )
+          )
+          .get()
+        if (recentTitle) continue
+
+        const score = scoreItem(item.title, item.summary ?? '', weight, item.publishedAt)
+        const risk = detectRisk(item.title + ' ' + (item.summary ?? ''))
+
+        db.insert(newsItems).values({
+          ...item,
+          ingestedAt: Date.now(),
+          relevanceScore: score,
+          riskLevel: risk.level,
+          riskReasons: JSON.stringify(risk.reasons),
+          isProcessed: 0,
+        }).run()
+
+        ingested++
+      } catch {}
+    }
+
+    // Update last fetched
+    db.update(newsSources)
+      .set({ lastFetchedAt: Date.now(), lastError: null })
+      .where(eq(newsSources.id, source.id))
+      .run()
+  }
+
+  try {
+    db.insert(auditLog).values({
+      id: crypto.randomUUID(),
+      eventType: 'news_ingested',
+      details: JSON.stringify({ ingested, errors }),
+      createdAt: Date.now(),
+    }).run()
+  } catch {}
+
+  return { ingested, errors }
+}

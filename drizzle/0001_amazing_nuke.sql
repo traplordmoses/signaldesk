@@ -1,0 +1,1 @@
+ALTER TABLE `event_clusters` ADD `topics` text;
