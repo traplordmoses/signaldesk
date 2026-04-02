@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic'
 import { NextResponse } from 'next/server'
 import { fetchAllSources } from '@/lib/news/fetcher'
 import { clusterNewItems } from '@/lib/news/clusterer'
