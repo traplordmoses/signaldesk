@@ -1,11 +1,16 @@
 async function main() {
-  const APP_ID = 'cli_a940d78cf7f89e18'
-  const APP_SECRET = 'DeGEKCq4pvwOIbxAFHbbZe35JQvvzERt'
+  const appId = process.env.LARK_APP_ID
+  const appSecret = process.env.LARK_APP_SECRET
+
+  if (!appId || !appSecret) {
+    console.error('LARK_APP_ID and LARK_APP_SECRET must be set in the environment')
+    process.exit(1)
+  }
 
   const tokenRes = await fetch('https://open.larksuite.com/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ app_id: APP_ID, app_secret: APP_SECRET }),
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
   })
   const tokenData = await tokenRes.json() as { tenant_access_token: string; code: number; msg: string }
 
