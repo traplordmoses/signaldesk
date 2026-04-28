@@ -19,6 +19,36 @@ const CATEGORY_LABELS: Record<string, string> = {
   culture:   '🎭 Culture',
 }
 
+const TAG_LABELS: Record<string, string> = {
+  '🇺🇸 美国': '🇺🇸 United States',
+  '🇨🇳 中国': '🇨🇳 China',
+  '🇷🇺 俄罗斯': '🇷🇺 Russia',
+  '🇺🇦 乌克兰': '🇺🇦 Ukraine',
+  '🇮🇷 伊朗': '🇮🇷 Iran',
+  '🇮🇱 以色列': '🇮🇱 Israel',
+  '🇪🇺 欧盟': '🇪🇺 European Union',
+  '🇬🇧 英国': '🇬🇧 United Kingdom',
+  '🌏 中东': '🌏 Middle East',
+  '🇩🇪 德国': '🇩🇪 Germany',
+  '🇯🇵 日本': '🇯🇵 Japan',
+  '🇰🇷 韩国': '🇰🇷 South Korea',
+  '🗳 选举': '🗳 Elections',
+  '💰 利率/央行': '💰 Rates/Central Banks',
+  '💥 军事/冲突': '💥 Military/Conflict',
+  '⚖️ 制裁/法律': '⚖️ Sanctions/Legal',
+  '🪙 加密': '🪙 Crypto',
+  '📊 宏观经济': '📊 Macro',
+  '🛢 能源': '🛢 Energy',
+  '🎵 娱乐': '🎵 Entertainment',
+  '🏆 体育': '🏆 Sports',
+  '🏥 健康/医疗': '🏥 Health/Medical',
+  '🌍 气候': '🌍 Climate',
+}
+
+function englishTag(tag: string): string {
+  return TAG_LABELS[tag] ?? tag
+}
+
 function headerTemplate(riskLevel: string): string {
   if (riskLevel === 'high') return 'red'
   if (riskLevel === 'medium') return 'orange'
@@ -90,7 +120,7 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
   })
 
   // Category + topic tags row
-  const allTags = [categoryLabel, ...topics]
+  const allTags = [categoryLabel, ...topics.map(englishTag)]
   elements.push({
     tag: 'div',
     text: {
