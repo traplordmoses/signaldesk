@@ -94,7 +94,6 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
 function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object {
   const elements: object[] = []
 
-  const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/review`
   const { names: sourceNames, earliest } = getClusterSources(cluster)
   const categoryLabel = CATEGORY_LABELS[cluster.category] ?? cluster.category
   const timeAgo = formatTimeAgo(cluster.firstSeenAt)
@@ -177,14 +176,9 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
         },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '✏️ Edit in Dashboard' },
+          text: { tag: 'plain_text', content: '✏️ Edit' },
           type: 'default',
-          multi_url: {
-            url: dashboardUrl,
-            pc_url: dashboardUrl,
-            ios_url: dashboardUrl,
-            android_url: dashboardUrl,
-          },
+          value: { action: 'edit', postId: post.id },
         },
         {
           tag: 'button',
@@ -313,9 +307,52 @@ function buildUpdatedCard(cluster: EventCluster, post: GeneratedPost, actorName:
   }
 }
 
-function buildEditDMCard(post: GeneratedPost): object {
-  const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/review`
+function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorName: string): object {
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: cluster.canonicalHeadline },
+      template: 'blue',
+    },
+    elements: [
+      {
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: `✏️ **Edited** by ${actorName}`,
+        },
+      },
+      { tag: 'div', text: { tag: 'lark_md', content: displayContent } },
+      { tag: 'div', text: { tag: 'lark_md', content: `_${post.content.length}/280 chars_` } },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '✅ Approve & Copy' },
+            type: 'primary',
+            value: { action: 'approve', postId: post.id },
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '✏️ Edit again' },
+            type: 'default',
+            value: { action: 'edit', postId: post.id },
+          },
+          {
+            tag: 'button',
+            text: { tag: 'plain_text', content: '❌ Reject' },
+            type: 'danger',
+            value: { action: 'reject', postId: post.id },
+          },
+        ],
+      },
+    ],
+  }
+}
+
+function buildEditDMCard(post: GeneratedPost): object {
   return {
     config: { wide_screen_mode: true },
     header: {
@@ -323,20 +360,40 @@ function buildEditDMCard(post: GeneratedPost): object {
       template: 'blue',
     },
     elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: '**✏️ Edit the post on the web dashboard**' } },
+      { tag: 'div', text: { tag: 'lark_md', content: '**Reply to this bot DM with the edited tweet text.**' } },
+      { tag: 'div', text: { tag: 'lark_md', content: 'Your next text reply to the bot will replace this draft in SignalDesk. Keep it under 280 characters.' } },
+      { tag: 'hr' },
+      { tag: 'div', text: { tag: 'lark_md', content: post.content.split('\n').map(l => `> ${l}`).join('\n') } },
+      { tag: 'div', text: { tag: 'lark_md', content: `Current length: **${post.content.length}/280** chars` } },
+    ],
+  }
+}
+
+function buildSavedEditDMCard(post: GeneratedPost): object {
+  const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
+  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: 'Draft updated' },
+      template: 'green',
+    },
+    elements: [
+      { tag: 'div', text: { tag: 'lark_md', content: '✅ **Saved.** The draft is updated in SignalDesk.' } },
       { tag: 'div', text: { tag: 'lark_md', content: displayContent } },
+      { tag: 'div', text: { tag: 'lark_md', content: `_${post.content.length}/280 chars_` } },
       {
         tag: 'action',
         actions: [
           {
             tag: 'button',
-            text: { tag: 'plain_text', content: '🖥️ Open Review Dashboard' },
-            type: 'default',
+            text: { tag: 'plain_text', content: '🐦 Open X to post' },
+            type: 'primary',
             multi_url: {
-              url: dashboardUrl,
-              pc_url: dashboardUrl,
-              ios_url: dashboardUrl,
-              android_url: dashboardUrl,
+              url: intentUrl,
+              pc_url: intentUrl,
+              ios_url: intentUrl,
+              android_url: intentUrl,
             },
           },
         ],
@@ -375,6 +432,19 @@ export async function updateGroupCard(
   })
 }
 
+export async function updateGroupCardEdited(
+  messageId: string,
+  cluster: EventCluster,
+  post: GeneratedPost,
+  actorName: string
+): Promise<void> {
+  const card = buildEditedGroupCard(cluster, post, actorName)
+  await larkPatch(`/im/v1/messages/${messageId}`, {
+    msg_type: 'interactive',
+    content: JSON.stringify(card),
+  })
+}
+
 export async function sendApprovalDM(openId: string, post: GeneratedPost): Promise<void> {
   const card = buildApprovalDMCard(post)
   await larkPost('/im/v1/messages?receive_id_type=open_id', {
@@ -399,6 +469,24 @@ export async function sendEditDM(openId: string, post: GeneratedPost): Promise<v
   const card = buildEditDMCard(post)
   await larkPost('/im/v1/messages?receive_id_type=open_id', {
     receive_id: openId,
+    msg_type: 'interactive',
+    content: JSON.stringify(card),
+  })
+}
+
+export async function sendSavedEditDM(openId: string, post: GeneratedPost): Promise<void> {
+  const card = buildSavedEditDMCard(post)
+  await larkPost('/im/v1/messages?receive_id_type=open_id', {
+    receive_id: openId,
+    msg_type: 'interactive',
+    content: JSON.stringify(card),
+  })
+}
+
+export async function updateEditDM(messageId: string, post: GeneratedPost): Promise<void> {
+  if (!messageId) return
+  const card = buildSavedEditDMCard(post)
+  await larkPatch(`/im/v1/messages/${messageId}`, {
     msg_type: 'interactive',
     content: JSON.stringify(card),
   })

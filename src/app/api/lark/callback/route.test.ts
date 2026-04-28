@@ -8,10 +8,12 @@ import { createHash } from 'crypto'
 
 vi.mock('@/lib/lark/handler', () => ({
   handleLarkCallback: vi.fn(async () => ({ code: 0, message: 'ok' })),
+  handleLarkMessage: vi.fn(async () => ({ code: 0 })),
 }))
 
 // Import AFTER the mock so the route's import resolves to the mocked handler.
 const { handleLarkCallback } = await import('@/lib/lark/handler')
+const { handleLarkMessage } = await import('@/lib/lark/handler')
 const { POST } = await import('./route')
 
 const SECRET = 'test-secret-do-not-use-in-prod'
@@ -114,6 +116,56 @@ describe('POST /api/lark/callback — signature verification', () => {
       action: { value: { action: 'approve', postId: 'p-modern' } },
       operator: { open_id: 'ou-modern', name: 'Reviewer' },
       context: { open_message_id: 'om-modern' },
+    })
+  })
+
+  it('passes card form values through for Lark-native edit saves', async () => {
+    const bodyText = JSON.stringify({
+      schema: '2.0',
+      header: { event_type: 'card.action.trigger' },
+      event: {
+        action: {
+          value: { action: 'save_edit', postId: 'p-edit' },
+          form_value: { edited_content: 'Edited draft text.' },
+        },
+        operator: { user_id: { open_id: 'ou-editor' }, user_name: 'Editor' },
+        context: { open_message_id: 'om-edit-dm' },
+      },
+    })
+
+    const res = await POST(makeRequest(bodyText, signedHeaders(bodyText)) as any)
+
+    expect(res.status).toBe(200)
+    expect(handleLarkCallback).toHaveBeenCalledWith({
+      action: { value: { action: 'save_edit', postId: 'p-edit', editedContent: 'Edited draft text.' } },
+      operator: { open_id: 'ou-editor', name: 'Editor' },
+      context: { open_message_id: 'om-edit-dm' },
+    })
+  })
+
+  it('routes text DMs to the Lark message edit handler', async () => {
+    const bodyText = JSON.stringify({
+      schema: '2.0',
+      header: { event_type: 'im.message.receive_v1' },
+      event: {
+        sender: {
+          sender_type: 'user',
+          sender_id: { open_id: 'ou-editor' },
+        },
+        message: {
+          message_type: 'text',
+          content: JSON.stringify({ text: 'Edited directly in Lark.' }),
+        },
+      },
+    })
+
+    const res = await POST(makeRequest(bodyText, signedHeaders(bodyText)) as any)
+
+    expect(res.status).toBe(200)
+    expect(handleLarkMessage).toHaveBeenCalledWith({
+      openId: 'ou-editor',
+      actorName: 'ou-editor',
+      text: 'Edited directly in Lark.',
     })
   })
 

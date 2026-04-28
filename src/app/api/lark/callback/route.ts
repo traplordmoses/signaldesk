@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { createHash } from 'crypto'
-import { handleLarkCallback } from '@/lib/lark/handler'
+import { handleLarkCallback, handleLarkMessage } from '@/lib/lark/handler'
 
 const TIMESTAMP_FRESHNESS_SEC = 5 * 60       // accept timestamps within ±5 min
 const NONCE_RETENTION_MS = 6 * 60 * 1000     // remember nonces for 6 min (5 min window + buffer)
@@ -23,7 +23,7 @@ function getString(obj: LarkCallbackObject | undefined, key: string): string | u
   return typeof value === 'string' ? value : undefined
 }
 
-function parseActionValue(value: unknown): { action?: string; postId?: string } {
+function parseActionValue(value: unknown): { action?: string; postId?: string; editedContent?: string } {
   let parsedValue: unknown = value
   if (typeof value === 'string') {
     try {
@@ -40,7 +40,30 @@ function parseActionValue(value: unknown): { action?: string; postId?: string } 
   return {
     action: getString(obj, 'action'),
     postId: getString(obj, 'postId') ?? getString(obj, 'post_id'),
+    editedContent: getString(obj, 'editedContent') ?? getString(obj, 'edited_content'),
   }
+}
+
+function extractFormString(actionObj: LarkCallbackObject | undefined, eventObj: LarkCallbackObject | undefined, key: string): string | undefined {
+  const candidateContainers = [
+    asObject(actionObj?.form_value),
+    asObject(actionObj?.formValue),
+    asObject(actionObj?.input_value),
+    asObject(actionObj?.inputValue),
+    asObject(eventObj?.form_value),
+    asObject(eventObj?.formValue),
+  ]
+
+  for (const container of candidateContainers) {
+    const direct = getString(container, key)
+    if (direct !== undefined) return direct
+
+    const nested = asObject(container?.[key])
+    const nestedValue = getString(nested, 'value') ?? getString(nested, 'text')
+    if (nestedValue !== undefined) return nestedValue
+  }
+
+  return undefined
 }
 
 function normalizeCardActionCallback(parsed: LarkCallbackObject): {
@@ -49,6 +72,7 @@ function normalizeCardActionCallback(parsed: LarkCallbackObject): {
   openId?: string
   actorName?: string
   openMessageId?: string
+  editedContent?: string
 } {
   // Lark can deliver card action callbacks either as the older direct shape:
   // { action, operator, context } or the newer event-wrapper shape:
@@ -60,6 +84,7 @@ function normalizeCardActionCallback(parsed: LarkCallbackObject): {
   const userIdObj = asObject(operatorObj?.user_id)
 
   const actionValue = parseActionValue(actionObj?.value)
+  const editedContent = actionValue.editedContent ?? extractFormString(actionObj, event, 'edited_content')
 
   return {
     action: actionValue.action,
@@ -74,6 +99,35 @@ function normalizeCardActionCallback(parsed: LarkCallbackObject): {
     openMessageId:
       getString(contextObj, 'open_message_id') ??
       getString(asObject(event?.message), 'open_message_id'),
+    editedContent,
+  }
+}
+
+function parseLarkTextMessageContent(content: unknown): string | undefined {
+  if (typeof content !== 'string') return undefined
+  try {
+    const parsedContent = JSON.parse(content) as Record<string, unknown>
+    const text = parsedContent.text
+    return typeof text === 'string' ? text : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeMessageReceiveCallback(parsed: LarkCallbackObject): {
+  openId?: string
+  actorName?: string
+  text?: string
+} {
+  const event = asObject(parsed.event)
+  const sender = asObject(event?.sender)
+  const senderId = asObject(sender?.sender_id)
+  const message = asObject(event?.message)
+
+  return {
+    openId: getString(senderId, 'open_id'),
+    actorName: getString(sender, 'sender_type') === 'user' ? getString(senderId, 'open_id') : undefined,
+    text: parseLarkTextMessageContent(message?.content),
   }
 }
 
@@ -154,11 +208,24 @@ export async function POST(req: NextRequest) {
 
   // Past this point the request is signed, fresh, and not a replay — body is trusted.
   try {
+    const eventType = getString(asObject(parsed.header), 'event_type') ?? getString(parsed, 'type')
+
+    if (eventType === 'im.message.receive_v1') {
+      const message = normalizeMessageReceiveCallback(parsed)
+      if (!message.openId || !message.text) return NextResponse.json({ code: 0 })
+      const result = await handleLarkMessage({
+        openId: message.openId,
+        actorName: message.actorName,
+        text: message.text,
+      })
+      return NextResponse.json(result)
+    }
+
     const normalized = normalizeCardActionCallback(parsed)
 
     if (!normalized.action || !normalized.openId) {
       console.warn('lark callback: ignored payload without action/open_id', {
-        eventType: getString(asObject(parsed.header), 'event_type') ?? getString(parsed, 'type'),
+        eventType,
         hasAction: Boolean(normalized.action),
         hasOpenId: Boolean(normalized.openId),
       })
@@ -169,14 +236,22 @@ export async function POST(req: NextRequest) {
       action: normalized.action,
       postId: normalized.postId,
       hasMessageId: Boolean(normalized.openMessageId),
+      hasEditedContent: Boolean(normalized.editedContent),
     })
+
+    const callbackValue: {
+      action: 'approve' | 'reject' | 'edit' | 'save_edit' | 'pause_bot' | 'resume_bot'
+      postId?: string
+      editedContent?: string
+    } = {
+      action: normalized.action as 'approve' | 'reject' | 'edit' | 'save_edit' | 'pause_bot' | 'resume_bot',
+      postId: normalized.postId,
+    }
+    if (normalized.editedContent !== undefined) callbackValue.editedContent = normalized.editedContent
 
     const result = await handleLarkCallback({
       action: {
-        value: {
-          action: normalized.action as 'approve' | 'reject' | 'edit' | 'pause_bot' | 'resume_bot',
-          postId: normalized.postId,
-        },
+        value: callbackValue,
       },
       operator: {
         open_id: normalized.openId,
