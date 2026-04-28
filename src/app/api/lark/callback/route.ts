@@ -10,6 +10,73 @@ const NONCE_RETENTION_MS = 6 * 60 * 1000     // remember nonces for 6 min (5 min
 // freshness check prevents replays older than ±5 min anyway.
 const seenNonces = new Map<string, number>()
 
+type LarkCallbackObject = Record<string, unknown>
+
+function asObject(value: unknown): LarkCallbackObject | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as LarkCallbackObject
+    : undefined
+}
+
+function getString(obj: LarkCallbackObject | undefined, key: string): string | undefined {
+  const value = obj?.[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function parseActionValue(value: unknown): { action?: string; postId?: string } {
+  let parsedValue: unknown = value
+  if (typeof value === 'string') {
+    try {
+      parsedValue = JSON.parse(value)
+    } catch (e) {
+      console.error(`lark callback: malformed action.value JSON: ${(e as Error).message}`)
+      return {}
+    }
+  }
+
+  const obj = asObject(parsedValue)
+  if (!obj) return {}
+
+  return {
+    action: getString(obj, 'action'),
+    postId: getString(obj, 'postId') ?? getString(obj, 'post_id'),
+  }
+}
+
+function normalizeCardActionCallback(parsed: LarkCallbackObject): {
+  action?: string
+  postId?: string
+  openId?: string
+  actorName?: string
+  openMessageId?: string
+} {
+  // Lark can deliver card action callbacks either as the older direct shape:
+  // { action, operator, context } or the newer event-wrapper shape:
+  // { header, event: { action, operator, context } }.
+  const event = asObject(parsed.event)
+  const actionObj = asObject(event?.action) ?? asObject(parsed.action)
+  const operatorObj = asObject(event?.operator) ?? asObject(parsed.operator)
+  const contextObj = asObject(event?.context) ?? asObject(parsed.context)
+  const userIdObj = asObject(operatorObj?.user_id)
+
+  const actionValue = parseActionValue(actionObj?.value)
+
+  return {
+    action: actionValue.action,
+    postId: actionValue.postId,
+    openId:
+      getString(operatorObj, 'open_id') ??
+      getString(userIdObj, 'open_id'),
+    actorName:
+      getString(operatorObj, 'name') ??
+      getString(operatorObj, 'user_name') ??
+      getString(userIdObj, 'open_id'),
+    openMessageId:
+      getString(contextObj, 'open_message_id') ??
+      getString(asObject(event?.message), 'open_message_id'),
+  }
+}
+
 function gcNonces(now: number) {
   for (const [k, expiry] of seenNonces.entries()) {
     if (expiry < now) seenNonces.delete(k)
@@ -87,40 +154,36 @@ export async function POST(req: NextRequest) {
 
   // Past this point the request is signed, fresh, and not a replay — body is trusted.
   try {
-    const payload = parsed as {
-      action?: { value?: string | { action?: string; postId?: string } }
-      operator?: { open_id?: string; name?: string }
-      context?: { open_message_id?: string }
-    }
+    const normalized = normalizeCardActionCallback(parsed)
 
-    if (!payload.action?.value || !payload.operator?.open_id) {
+    if (!normalized.action || !normalized.openId) {
+      console.warn('lark callback: ignored payload without action/open_id', {
+        eventType: getString(asObject(parsed.header), 'event_type') ?? getString(parsed, 'type'),
+        hasAction: Boolean(normalized.action),
+        hasOpenId: Boolean(normalized.openId),
+      })
       return NextResponse.json({ code: 0 })
     }
 
-    let actionValue: { action?: string; postId?: string } = {}
-    if (typeof payload.action.value === 'string') {
-      try {
-        actionValue = JSON.parse(payload.action.value)
-      } catch (e) {
-        console.error(`lark callback: malformed action.value JSON: ${(e as Error).message}`)
-      }
-    } else {
-      actionValue = payload.action.value
-    }
+    console.log('lark callback: action received', {
+      action: normalized.action,
+      postId: normalized.postId,
+      hasMessageId: Boolean(normalized.openMessageId),
+    })
 
     const result = await handleLarkCallback({
       action: {
         value: {
-          action: actionValue.action as 'approve' | 'reject' | 'edit' | 'pause_bot' | 'resume_bot',
-          postId: actionValue.postId,
+          action: normalized.action as 'approve' | 'reject' | 'edit' | 'pause_bot' | 'resume_bot',
+          postId: normalized.postId,
         },
       },
       operator: {
-        open_id: payload.operator.open_id,
-        name: payload.operator.name,
+        open_id: normalized.openId,
+        name: normalized.actorName,
       },
       context: {
-        open_message_id: payload.context?.open_message_id ?? '',
+        open_message_id: normalized.openMessageId ?? '',
       },
     })
 

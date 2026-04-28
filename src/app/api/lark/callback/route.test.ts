@@ -11,6 +11,7 @@ vi.mock('@/lib/lark/handler', () => ({
 }))
 
 // Import AFTER the mock so the route's import resolves to the mocked handler.
+const { handleLarkCallback } = await import('@/lib/lark/handler')
 const { POST } = await import('./route')
 
 const SECRET = 'test-secret-do-not-use-in-prod'
@@ -36,6 +37,7 @@ function signedHeaders(bodyText: string, opts: { ageSec?: number; nonce?: string
 
 describe('POST /api/lark/callback — signature verification', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
     process.env.LARK_APP_SECRET = SECRET
   })
 
@@ -92,6 +94,27 @@ describe('POST /api/lark/callback — signature verification', () => {
     })
     const res = await POST(makeRequest(bodyText, signedHeaders(bodyText)) as any)
     expect(res.status).toBe(200)
+  })
+
+  it('accepts modern event-wrapped card action callbacks', async () => {
+    const bodyText = JSON.stringify({
+      schema: '2.0',
+      header: { event_type: 'card.action.trigger' },
+      event: {
+        action: { value: { action: 'approve', postId: 'p-modern' } },
+        operator: { user_id: { open_id: 'ou-modern' }, user_name: 'Reviewer' },
+        context: { open_message_id: 'om-modern' },
+      },
+    })
+
+    const res = await POST(makeRequest(bodyText, signedHeaders(bodyText)) as any)
+
+    expect(res.status).toBe(200)
+    expect(handleLarkCallback).toHaveBeenCalledWith({
+      action: { value: { action: 'approve', postId: 'p-modern' } },
+      operator: { open_id: 'ou-modern', name: 'Reviewer' },
+      context: { open_message_id: 'om-modern' },
+    })
   })
 
   it('rejects replays of an already-seen nonce', async () => {

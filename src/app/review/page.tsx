@@ -68,10 +68,21 @@ export default function ReviewPage() {
   }
 
   async function handleCopyAndPost(id: string) {
-    const res = await fetch(`/api/posts/${id}/publish`, { method: 'POST' })
-    const data = await res.json() as { intentUrl?: string }
-    if (data.intentUrl) window.open(data.intentUrl, '_blank')
-    await loadPosts(tab)
+    const postWindow = window.open('', '_blank')
+    try {
+      const res = await fetch(`/api/posts/${id}/publish`, { method: 'POST' })
+      const data = await res.json() as { intentUrl?: string; error?: string }
+      if (!res.ok || !data.intentUrl) throw new Error(data.error ?? 'Publish request failed')
+      if (postWindow) {
+        postWindow.location.href = data.intentUrl
+      } else {
+        window.location.href = data.intentUrl
+      }
+      await loadPosts(tab)
+    } catch (e) {
+      postWindow?.close()
+      console.error(`copy/post failed (post=${id}):`, e)
+    }
   }
 
   return (

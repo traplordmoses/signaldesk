@@ -64,6 +64,7 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
 function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object {
   const elements: object[] = []
 
+  const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}/review`
   const { names: sourceNames, earliest } = getClusterSources(cluster)
   const categoryLabel = CATEGORY_LABELS[cluster.category] ?? cluster.category
   const timeAgo = formatTimeAgo(cluster.firstSeenAt)
@@ -142,19 +143,24 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
           tag: 'button',
           text: { tag: 'plain_text', content: '✅ Approve & Copy' },
           type: 'primary',
-          value: JSON.stringify({ action: 'approve', postId: post.id }),
+          value: { action: 'approve', postId: post.id },
         },
         {
           tag: 'button',
-          text: { tag: 'plain_text', content: '✏️ Edit' },
+          text: { tag: 'plain_text', content: '✏️ Edit in Dashboard' },
           type: 'default',
-          value: JSON.stringify({ action: 'edit', postId: post.id }),
+          multi_url: {
+            url: dashboardUrl,
+            pc_url: dashboardUrl,
+            ios_url: dashboardUrl,
+            android_url: dashboardUrl,
+          },
         },
         {
           tag: 'button',
           text: { tag: 'plain_text', content: '❌ Reject' },
           type: 'danger',
-          value: JSON.stringify({ action: 'reject', postId: post.id }),
+          value: { action: 'reject', postId: post.id },
         },
       ],
     })
@@ -169,7 +175,7 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
         tag: 'button',
         text: { tag: 'plain_text', content: '⏸ Pause Bot' },
         type: 'default',
-        value: JSON.stringify({ action: 'pause_bot' }),
+        value: { action: 'pause_bot' },
       },
     ],
   })
@@ -209,13 +215,13 @@ export function buildBotStatusCard(paused: boolean): object {
                 tag: 'button',
                 text: { tag: 'plain_text', content: '▶️ Resume Bot' },
                 type: 'primary',
-                value: JSON.stringify({ action: 'resume_bot' }),
+                value: { action: 'resume_bot' },
               }
             : {
                 tag: 'button',
                 text: { tag: 'plain_text', content: '⏸ Pause Bot' },
                 type: 'default',
-                value: JSON.stringify({ action: 'pause_bot' }),
+                value: { action: 'pause_bot' },
               },
         ],
       },
