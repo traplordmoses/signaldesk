@@ -24,7 +24,9 @@ export default function ReviewPage() {
       const res = await fetch(`/api/posts?status=${status}&limit=50`)
       const data = await res.json() as { posts: GeneratedPost[] }
       setPosts(data.posts ?? [])
-    } catch {}
+    } catch (e) {
+      console.error(`loadPosts failed (status=${status}):`, e)
+    }
     setLoading(false)
   }, [])
 

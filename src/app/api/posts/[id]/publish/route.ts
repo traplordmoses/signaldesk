@@ -28,7 +28,9 @@ export async function POST(
         details: JSON.stringify({ clusterId: post.clusterId }),
         createdAt: Date.now(),
       }).run()
-    } catch {}
+    } catch (e) {
+      console.error(`audit log write failed (post_published, post=${id}):`, e)
+    }
 
     const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
     return NextResponse.json({ success: true, intentUrl })

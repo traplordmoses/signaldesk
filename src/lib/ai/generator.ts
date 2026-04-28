@@ -1,7 +1,17 @@
 import { db } from '@/lib/db'
-import { generatedPosts, eventClusters, auditLog } from '@/lib/db/schema'
-import { eq } from 'drizzle-orm'
+import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/schema'
+import { eq, gt } from 'drizzle-orm'
 import { SIGNALDESK_PROMPT_V1 } from './prompts'
+
+// Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
+// counts generated_posts in the last 24h, and blocks further generation when at/over.
+function isOverDailyLimit(): { over: boolean; count: number; limit: number } {
+  const setting = db.select().from(settings).limit(1).get()
+  const limit = setting?.dailyPostLimit ?? 20
+  const since = Date.now() - 24 * 60 * 60 * 1000
+  const rows = db.select().from(generatedPosts).where(gt(generatedPosts.createdAt, since)).all()
+  return { over: rows.length >= limit, count: rows.length, limit }
+}
 
 type ContentMode = 'pure_news' | 'news_odds' | 'engagement'
 type Cluster = typeof eventClusters.$inferSelect
@@ -16,24 +26,115 @@ interface AIResponse {
   score_explanation: string
 }
 
-async function callTogetherAI(cluster: Cluster, marketUrl: string, modeHint?: ContentMode): Promise<AIResponse> {
-  const apiKey = process.env.TOGETHER_API_KEY
-  if (!apiKey) throw new Error('TOGETHER_API_KEY not set')
+// Patterns that indicate prompt-injection attempts in RSS-sourced content.
+// We replace matches with [redacted] before assembling the user prompt so that
+// adversarial headlines from feeds (or feeds-of-feeds) can't slip new instructions
+// into the system role.
+const PROMPT_INJECTION_PATTERNS: RegExp[] = [
+  /\b(system|assistant|user)\s*:/gi,
+  /ignore\s+(?:all\s+)?(?:prior|previous|above)\s+(?:instructions|rules|prompts|directions)/gi,
+  /\[INST\]|\[\/INST\]/gi,
+  /<\|[^|]{1,40}\|>/g,
+  /\bact\s+as\b/gi,
+  /\bnew\s+(?:instructions|rules|task)\b/gi,
+]
 
+// Phrases that should NEVER appear in published output. If the AI emits one,
+// we throw and fail the generation rather than ship potentially defamatory copy.
+const BANNED_OUTPUT_PHRASES: RegExp[] = [
+  /sec\s+(?:just\s+)?(?:opened|launched|filed)\s+(?:a\s+)?(?:criminal\s+)?(?:probe|investigation)/i,
+  /\bcriminal\s+probe\b/i,
+  /\bi\s+am\s+(?:an?\s+)?ai\b/i,
+  /\bas\s+an?\s+ai\s+(?:language\s+)?model\b/i,
+]
+
+function sanitizeForPrompt(input: string, maxLen = 500): string {
+  let cleaned = String(input ?? '')
+  for (const pat of PROMPT_INJECTION_PATTERNS) {
+    cleaned = cleaned.replace(pat, '[redacted]')
+  }
+  cleaned = cleaned.replace(/\s+/g, ' ').trim()
+  return cleaned.slice(0, maxLen)
+}
+
+// Catches fabricated percentages — the biggest hallucination class for a prediction-
+// market bot. The prompt says "NEVER invent a specific percentage you don't have"
+// but at temp 0.8 with no validator, the model will. We extract all %s from the
+// output and verify each one appears in the input context (within ±1 for rounding).
+// If any output % isn't in context, throw — the post is rejected.
+const PCT_RE = /\b(\d{1,3}(?:\.\d+)?)\s*%/g
+function checkForFabricatedPercentages(content: string, contextText: string): void {
+  const out: number[] = []
+  for (const m of content.matchAll(PCT_RE)) out.push(parseFloat(m[1]))
+  if (out.length === 0) return
+
+  const ctx: number[] = []
+  for (const m of contextText.matchAll(PCT_RE)) ctx.push(parseFloat(m[1]))
+
+  for (const n of out) {
+    const matched = ctx.some(c => Math.abs(c - n) <= 1)
+    if (!matched) {
+      throw new Error(`fabricated percentage in output: ${n}% — not present in input context`)
+    }
+  }
+}
+
+function validateAIResponse(raw: unknown): AIResponse {
+  if (typeof raw !== 'object' || raw === null) throw new Error('AI response not an object')
+  const r = raw as Record<string, unknown>
+
+  if (r.content_mode !== 'pure_news' && r.content_mode !== 'news_odds' && r.content_mode !== 'engagement') {
+    throw new Error(`Invalid content_mode: ${String(r.content_mode)}`)
+  }
+  const content = r.content
+  if (typeof content !== 'string') throw new Error('content not a string')
+  if (content.length < 20 || content.length > 400) {
+    throw new Error(`content length out of bounds: ${content.length}`)
+  }
+  for (const banned of BANNED_OUTPUT_PHRASES) {
+    if (banned.test(content)) {
+      throw new Error(`output contained banned phrase: ${banned.source.slice(0, 60)}`)
+    }
+  }
+
+  return {
+    content_mode: r.content_mode,
+    has_market: typeof r.has_market === 'boolean' ? r.has_market : false,
+    include_link: typeof r.include_link === 'boolean' ? r.include_link : false,
+    content,
+    char_count: typeof r.char_count === 'number' ? r.char_count : content.length,
+    estimated_score: typeof r.estimated_score === 'number' ? r.estimated_score : 5,
+    score_explanation: typeof r.score_explanation === 'string' ? r.score_explanation : '',
+  }
+}
+
+async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: ContentMode): Promise<AIResponse> {
+  const apiKey: string | undefined = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set')
+  // Narrowed binding so the inner closure can use it without TS widening back to string|undefined
+  const key: string = apiKey
+  const model = process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5-20251001'
+
+  // Sanitize each constituent summary individually (so split-injection across cluster
+  // items can't reassemble) then cap the joined total.
   const summaries: string[] = []
   try { summaries.push(...JSON.parse(cluster.constituentSummaries ?? '[]')) } catch {}
-  const summaryText = summaries.join(' ').slice(0, 600)
+  const sanitizedSummaries = summaries.map(s => sanitizeForPrompt(s, 200))
+  const summaryText = sanitizedSummaries.join(' ').slice(0, 600)
+
+  const safeHeadline = sanitizeForPrompt(cluster.canonicalHeadline, 240)
+  const safeCategory = sanitizeForPrompt(cluster.category, 40)
 
   const ageMinutes = Math.round((Date.now() - cluster.firstSeenAt) / 60000)
   const modeInstruction = modeHint
     ? `You MUST use content_mode: "${modeHint}".`
     : `Choose the most appropriate content_mode based on the story age, category, and whether a Polymarket market likely exists.`
 
-  const userPrompt = `Category: ${cluster.category}
+  const userPrompt = `Category: ${safeCategory}
 Age: ${ageMinutes} minutes old
 Relevance score: ${(cluster.relevanceScore ?? 0).toFixed(1)}/10
 
-Headline: ${cluster.canonicalHeadline}
+Headline: ${safeHeadline}
 Context/Summary: ${summaryText || '(no additional context)'}
 Market URL (use ONLY for news_odds and engagement modes, NOT for pure_news): ${marketUrl}
 
@@ -47,34 +148,54 @@ Remember:
 Now write one post.`
 
   const body = {
-    model: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-    messages: [
-      { role: 'system', content: SIGNALDESK_PROMPT_V1 },
-      { role: 'user', content: userPrompt },
-    ],
+    model,
     max_tokens: 600,
     temperature: 0.8,
+    system: SIGNALDESK_PROMPT_V1,
+    messages: [{ role: 'user', content: userPrompt }],
   }
 
   async function doFetch(): Promise<Response> {
-    return fetch('https://api.together.xyz/v1/chat/completions', {
+    return fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
       body: JSON.stringify(body),
     })
   }
 
-  let res = await doFetch()
-  if (res.status === 429) {
-    await new Promise(r => setTimeout(r, 2000))
+  // Retry transient failures (rate limits + 5xx) with exponential backoff: 2s, 4s, 8s.
+  // 4xx other than 429 fail immediately — they're our error, not theirs.
+  const RETRY_DELAYS_MS = [2000, 4000, 8000]
+  let res: Response | null = null
+  let lastError = ''
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
     res = await doFetch()
+    if (res.ok) break
+    const transient = res.status === 429 || res.status >= 500
+    if (!transient) break
+    lastError = `${res.status}`
+    if (attempt === RETRY_DELAYS_MS.length) break
+    await new Promise(r => setTimeout(r, RETRY_DELAYS_MS[attempt]))
   }
-  if (!res.ok) throw new Error(`Together AI error: ${res.status}`)
+  if (!res || !res.ok) {
+    const errBody = res ? await res.text().catch(() => '') : ''
+    throw new Error(`Anthropic API error: ${res?.status ?? 'no response'} ${errBody.slice(0, 200)} (last=${lastError})`)
+  }
 
-  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> }
-  const raw = data.choices?.[0]?.message?.content ?? ''
+  const data = await res.json() as { content?: Array<{ text?: string }> }
+  const raw = data.content?.[0]?.text ?? ''
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim()
-  return JSON.parse(cleaned) as AIResponse
+  let parsed: unknown
+  try { parsed = JSON.parse(cleaned) } catch (e) {
+    throw new Error(`AI response was not valid JSON: ${(e as Error).message}`)
+  }
+  const validated = validateAIResponse(parsed)
+  checkForFabricatedPercentages(validated.content, userPrompt)
+  return validated
 }
 
 export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
@@ -82,12 +203,10 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
   const marketUrl = `${marketBaseUrl}/${cluster.id}`
 
   try {
-    const result = await callTogetherAI(cluster, marketUrl, modeHint)
+    const result = await callClaude(cluster, marketUrl, modeHint)
 
-    // Force-strip any URL from pure_news — AI sometimes ignores the instruction
-    if (result.content_mode === 'pure_news') {
-      result.content = result.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
-    }
+    // Force-strip ANY URL from ALL modes — tweets are text-only per marketing
+    result.content = result.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
 
     const post = {
       id: crypto.randomUUID(),
@@ -114,7 +233,9 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
         details: JSON.stringify({ clusterId: cluster.id, mode: result.content_mode, hasMarket: result.has_market }),
         createdAt: Date.now(),
       }).run()
-    } catch {}
+    } catch (e) {
+      console.error(`audit log write failed (post_generated, post=${post.id}):`, e)
+    }
 
     return db.select().from(generatedPosts).where(eq(generatedPosts.id, post.id)).get()!
   } catch (error) {
@@ -129,13 +250,61 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
         errorMessage: message,
         createdAt: Date.now(),
       }).run()
-    } catch {}
+    } catch (e) {
+      console.error(`audit log write failed (generation error, cluster=${cluster.id}):`, e)
+    }
     throw error
   }
 }
 
 // Smart generation: high score = 2 posts (pure_news speed + AI-chosen), medium = 1 AI-chosen post
 export async function generateSmartPosts(cluster: Cluster) {
+  // Daily cap — enforces settings.daily_post_limit so a runaway cron doesn't burn LLM credits.
+  const cap = isOverDailyLimit()
+  if (cap.over) {
+    try {
+      db.insert(auditLog).values({
+        id: crypto.randomUUID(),
+        eventType: 'skip',
+        entityType: 'event_cluster',
+        entityId: cluster.id,
+        details: JSON.stringify({ reason: 'daily_limit_reached', count: cap.count, limit: cap.limit }),
+        createdAt: Date.now(),
+      }).run()
+    } catch (e) {
+      console.error(`audit log write failed: ${(e as Error).message}`)
+    }
+    return []
+  }
+
+  // HIGH_RISK gate — clusters flagged with riskLevel='high' (death, shooting, bombing, etc.)
+  // are NEVER auto-generated. They sit at status='high_risk_skipped' until a human explicitly
+  // calls /api/posts/generate with the cluster_id. Stops the bot from auto-writing
+  // "what's the Polymarket angle on this tragedy" posts.
+  if (cluster.riskLevel === 'high') {
+    db.update(eventClusters)
+      .set({ status: 'high_risk_skipped', lastUpdatedAt: Date.now() })
+      .where(eq(eventClusters.id, cluster.id))
+      .run()
+    try {
+      db.insert(auditLog).values({
+        id: crypto.randomUUID(),
+        eventType: 'skip',
+        entityType: 'event_cluster',
+        entityId: cluster.id,
+        details: JSON.stringify({
+          reason: 'high_risk_auto_skip',
+          headline: cluster.canonicalHeadline.slice(0, 120),
+          riskReasons: cluster.riskReasons,
+        }),
+        createdAt: Date.now(),
+      }).run()
+    } catch (e) {
+      console.error(`audit log write failed for cluster ${cluster.id}:`, e)
+    }
+    return []
+  }
+
   const score = cluster.relevanceScore ?? 0
   const posts: (typeof generatedPosts.$inferSelect)[] = []
 

@@ -48,8 +48,9 @@ export async function GET(req: NextRequest) {
             // Heartbeat every 15s to keep connection alive
             controller.enqueue(encoder.encode(': ping\n\n'))
           }
-        } catch {
-          // DB errors shouldn't kill the stream
+        } catch (e) {
+          // DB errors shouldn't kill the stream — but log them so we know it's happening
+          console.error('event stream poll failed:', e)
           controller.enqueue(encoder.encode(': error\n\n'))
         }
       }, 15000)

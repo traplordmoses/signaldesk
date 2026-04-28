@@ -11,8 +11,41 @@ function sha256(str: string): string {
   return createHash('sha256').update(str).digest('hex')
 }
 
+// Normalize URL for dedup: lowercase host, drop UTM/tracking params, strip trailing slash,
+// strip fragment, strip AMP suffix. Same article via Reuters direct + AMP + Google News
+// redirect now hashes to the same value.
+const TRACKING_PARAMS = /^(utm_|fbclid|gclid|mc_|ref|ref_|igshid|s_cid|share)/i
+function normalizeUrl(raw: string): string {
+  try {
+    const u = new URL(raw)
+    u.hash = ''
+    u.host = u.host.toLowerCase()
+    const keep = new URLSearchParams()
+    for (const [k, v] of u.searchParams) {
+      if (!TRACKING_PARAMS.test(k)) keep.append(k, v)
+    }
+    u.search = keep.toString() ? `?${keep.toString()}` : ''
+    let path = u.pathname.replace(/\/+$/, '')                  // trailing slash
+    path = path.replace(/\/(amp|amp\.html|amp\.htm)$/i, '')    // AMP suffix
+    u.pathname = path || '/'
+    return u.toString()
+  } catch {
+    return raw
+  }
+}
+
+// Title-hash key: lowercase, strip newsy prefixes (BREAKING:, JUST IN:, EXCLUSIVE:),
+// strip non-alphanumerics, take first 12 tokens. "BREAKING: Fed Holds Rates Steady"
+// and "Fed Holds Rates Steady After Powell Remarks" now collide; ditto reordered/punctuation variants.
+const TITLE_PREFIXES = /^(breaking|just in|exclusive|update|live|developing|alert|watch)\s*:/i
 function titleWords(title: string): string {
-  return title.toLowerCase().split(/\s+/).slice(0, 8).join(' ')
+  const cleaned = title
+    .toLowerCase()
+    .replace(TITLE_PREFIXES, '')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return cleaned.split(' ').slice(0, 12).join(' ')
 }
 
 interface NormalizedItem {
@@ -41,12 +74,13 @@ async function fetchSource(source: typeof newsSources.$inferSelect): Promise<{ i
       const summary = entry.contentSnippet ?? entry.summary ?? entry.content ?? ''
       const publishedAt = entry.pubDate ? new Date(entry.pubDate).getTime() : Date.now()
 
+      const normalizedUrl = normalizeUrl(url)
       items.push({
         id: crypto.randomUUID(),
         title,
         summary: summary.slice(0, 500),
-        url,
-        urlHash: sha256(url),
+        url: normalizedUrl,
+        urlHash: sha256(normalizedUrl),
         titleHash: sha256(titleWords(title)),
         sourceId: source.id,
         sourceName: source.name,
@@ -94,7 +128,9 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
           details: JSON.stringify({ sourceUrl: source.url }),
           createdAt: Date.now(),
         }).run()
-      } catch {}
+      } catch (e) {
+        console.error(`audit log write failed (news_source ${source.id}):`, e)
+      }
       continue
     }
 
@@ -136,7 +172,9 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
         }).run()
 
         ingested++
-      } catch {}
+      } catch (e) {
+        console.error(`news_item insert failed (url=${item.url.slice(0, 80)}):`, e)
+      }
     }
 
     // Update last fetched
@@ -153,7 +191,9 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
       details: JSON.stringify({ ingested, errors }),
       createdAt: Date.now(),
     }).run()
-  } catch {}
+  } catch (e) {
+    console.error('audit log write failed (news_ingested):', e)
+  }
 
   return { ingested, errors }
 }

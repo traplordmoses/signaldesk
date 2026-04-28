@@ -54,7 +54,8 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
     const names = [...new Set(items.map(i => i.sourceName))].slice(0, 3)
     const earliest = items.reduce((min, i) => Math.min(min, i.publishedAt), Date.now())
     return { names, earliest }
-  } catch {
+  } catch (e) {
+    console.error(`getClusterSources failed (cluster=${cluster.id}):`, e)
     return { names: [], earliest: cluster.firstSeenAt }
   }
 }

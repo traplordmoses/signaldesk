@@ -26,18 +26,36 @@ const MEDIUM_RISK = [
   'conflict', 'legal', 'reportedly',
 ]
 
+// Word-boundary keyword matching. `text.includes('doj')` would hit any string
+// containing the substring "doj" — including unrelated words. This builds a regex
+// per keyword that requires non-word chars (or string boundaries) on either side,
+// while still allowing multi-word keywords like "rate cut" to match across spaces.
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+const WORD_RE_CACHE = new Map<string, RegExp>()
+function wordBoundaryMatch(text: string, kw: string): boolean {
+  let re = WORD_RE_CACHE.get(kw)
+  if (!re) {
+    re = new RegExp(`(?:^|\\W)${escapeRegex(kw)}(?:$|\\W)`, 'i')
+    WORD_RE_CACHE.set(kw, re)
+  }
+  return re.test(text)
+}
+
 export function scoreItem(title: string, summary: string, weight: number, publishedAt: number): number {
   const text = (title + ' ' + (summary ?? '')).toLowerCase()
   let score = 0
 
   for (const kw of TIER1) {
-    if (text.includes(kw)) score += 4
+    if (wordBoundaryMatch(text, kw)) score += 4
   }
   for (const kw of TIER2) {
-    if (text.includes(kw)) score += 2
+    if (wordBoundaryMatch(text, kw)) score += 2
   }
   for (const kw of TIER3) {
-    if (text.includes(kw)) score += 1
+    if (wordBoundaryMatch(text, kw)) score += 1
   }
 
   // Source weight bonus
@@ -58,12 +76,12 @@ export function detectRisk(text: string): { level: 'low' | 'medium' | 'high'; re
   const reasons: string[] = []
 
   for (const kw of HIGH_RISK) {
-    if (lower.includes(kw)) reasons.push(kw)
+    if (wordBoundaryMatch(lower, kw)) reasons.push(kw)
   }
   if (reasons.length > 0) return { level: 'high', reasons }
 
   for (const kw of MEDIUM_RISK) {
-    if (lower.includes(kw)) reasons.push(kw)
+    if (wordBoundaryMatch(lower, kw)) reasons.push(kw)
   }
   if (reasons.length > 0) return { level: 'medium', reasons }
 

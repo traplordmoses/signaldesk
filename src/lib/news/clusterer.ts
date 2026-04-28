@@ -4,12 +4,27 @@ import { eq, and, gt } from 'drizzle-orm'
 import { getTier1And2Keywords } from './scorer'
 import { extractTopics } from './tagger'
 
+// Word-boundary match — same fix as scorer.ts. .includes() would fire "doj" on
+// any string containing those chars; we'd cluster unrelated articles together.
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+const WORD_RE_CACHE = new Map<string, RegExp>()
+function wordBoundaryMatch(text: string, kw: string): boolean {
+  let re = WORD_RE_CACHE.get(kw)
+  if (!re) {
+    re = new RegExp(`(?:^|\\W)${escapeRegex(kw)}(?:$|\\W)`, 'i')
+    WORD_RE_CACHE.set(kw, re)
+  }
+  return re.test(text)
+}
+
 function extractKeywords(text: string): Set<string> {
   const lower = text.toLowerCase()
   const keywords = getTier1And2Keywords()
   const found = new Set<string>()
   for (const kw of keywords) {
-    if (lower.includes(kw)) found.add(kw)
+    if (wordBoundaryMatch(lower, kw)) found.add(kw)
   }
   return found
 }
@@ -125,7 +140,9 @@ export async function clusterNewItems(): Promise<number> {
         }
 
         clustersCreated++
-      } catch {}
+      } catch (e) {
+        console.error(`cluster create failed (cluster_id=${clusterId}, items=${clusterItems.length}):`, e)
+      }
     }
   }
 

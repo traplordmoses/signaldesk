@@ -3,11 +3,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { eventClusters } from '@/lib/db/schema'
 import { eq } from 'drizzle-orm'
-import { generateAllModes } from '@/lib/ai/generator'
+import { generateAllModes, generatePost } from '@/lib/ai/generator'
+
+type ContentMode = 'pure_news' | 'news_odds' | 'engagement'
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json() as { cluster_id?: string }
+    const body = await req.json() as { cluster_id?: string; mode?: ContentMode }
     const clusterId = body.cluster_id
 
     if (!clusterId) {
@@ -19,7 +21,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Cluster not found' }, { status: 404 })
     }
 
-    const posts = await generateAllModes(cluster)
+    // If mode is specified, generate just that mode; otherwise smart-pick
+    const posts = body.mode ? [await generatePost(cluster, body.mode)] : await generateAllModes(cluster)
     return NextResponse.json({ posts })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

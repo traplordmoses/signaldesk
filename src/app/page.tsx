@@ -26,7 +26,9 @@ export default function DashboardPage() {
       const data = await res.json() as { clusters: ClusterWithPosts[] }
       setClusters(data.clusters ?? [])
       setHasHighRisk(data.clusters.some(c => c.riskLevel === 'high' && (c.postCount ?? 0) === 0))
-    } catch {}
+    } catch (e) {
+      console.error('loadClusters failed:', e)
+    }
     setLoading(false)
   }, [])
 
@@ -40,7 +42,9 @@ export default function DashboardPage() {
       setPendingCount(pendingData.total ?? 0)
       const todayPosts = postedData.posts?.filter(p => p.postedAt && p.postedAt > dayStart).length ?? 0
       setPostedToday(todayPosts)
-    } catch {}
+    } catch (e) {
+      console.error('loadStats failed:', e)
+    }
   }, [])
 
   // Real-time SSE monitoring
@@ -56,7 +60,9 @@ export default function DashboardPage() {
           loadClusters()
           loadStats()
         }
-      } catch {}
+      } catch (err) {
+        console.error('SSE message parse failed:', err)
+      }
     }
 
     return () => { es.close() }
