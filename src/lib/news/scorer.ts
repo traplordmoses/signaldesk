@@ -2,13 +2,20 @@ const TIER1 = [
   'fed rate', 'fomc', 'cpi report', 'jobs report', 'election result',
   'rate hike', 'rate cut', 'war declared', 'coup', 'nuclear', 'sanctions',
   'default', 'resign', 'assassination', 'rate decision', 'indicted',
-  'military', 'airstrike', 'invasion',
+  'military', 'airstrike', 'invasion', 'fomc statement',
+  'known exploited vulnerability', 'kev catalog', 'emergency alert',
+  'tornado warning', 'hurricane warning', 'major earthquake',
 ]
 
 const TIER2 = [
   'interest rate', 'inflation', 'gdp', 'earnings', 'acquisition', 'ipo',
   'championship', 'trade deal', 'fda approval', 'bitcoin etf', 'sec ruling',
   'arrested', 'fired', 'hired', 'merger', 'bankruptcy', 'tariff',
+  'material definitive agreement', 'results of operations',
+  'regulation fd disclosure', 'guidance', 'recall', 'class i',
+  'class ii', 'cve', 'vulnerability', 'exploit', 'data breach',
+  'cyberattack', 'severe thunderstorm warning', 'flash flood warning',
+  'earthquake',
 ]
 
 const TIER3 = [
@@ -46,6 +53,9 @@ const HIGH_STAKES = [
 
   // sensitive but routine in news: prefer human review over auto-skip
   'death',
+
+  // cyber / public-health alerts: relevant but should still be reviewed
+  'data breach', 'cyberattack', 'kev catalog', 'class i recall',
 
   // political heat (kept from the old MEDIUM_RISK list)
   'political', 'election', 'controversy', 'scandal', 'protest',

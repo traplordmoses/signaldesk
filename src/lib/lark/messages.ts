@@ -22,6 +22,9 @@ const CATEGORY_LABELS: Record<string, string> = {
   sports:    '🏆 Sports',
   tech:      '💻 Tech',
   culture:   '🎭 Culture',
+  cyber:     '🛡 Cyber',
+  health:    '🏥 Health',
+  weather:   '🌪 Weather',
 }
 
 const TAG_LABELS: Record<string, string> = {
@@ -48,6 +51,8 @@ const TAG_LABELS: Record<string, string> = {
   '🏆 体育': '🏆 Sports',
   '🏥 健康/医疗': '🏥 Health/Medical',
   '🌍 气候': '🌍 Climate',
+  '🛡 Cybersecurity': '🛡 Cybersecurity',
+  '🌪 Severe Weather': '🌪 Severe Weather',
 }
 
 function englishTag(tag: string): string {

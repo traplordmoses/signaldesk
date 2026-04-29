@@ -17,6 +17,7 @@ export default function DashboardPage() {
   const [hasHighRisk, setHasHighRisk] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
   const [postedToday, setPostedToday] = useState(0)
+  const [sourcesActive, setSourcesActive] = useState(0)
   const [newAlert, setNewAlert] = useState<{ count: number; headline: string } | null>(null)
   const sseRef = useRef<EventSource | null>(null)
 
@@ -35,13 +36,19 @@ export default function DashboardPage() {
   const loadStats = useCallback(async () => {
     try {
       const dayStart = Date.now() - 24 * 60 * 60 * 1000
-      const [pendingData, postedData] = await Promise.all([
+      const [pendingData, postedData, healthData] = await Promise.all([
         fetch('/api/posts?status=pending&limit=100').then(r => r.json()),
         fetch('/api/posts?status=posted&limit=100').then(r => r.json()),
-      ]) as [{ total: number }, { posts: Array<{ postedAt: number | null }> }]
+        fetch('/api/health').then(r => r.json()).catch(() => null),
+      ]) as [
+        { total: number },
+        { posts: Array<{ postedAt: number | null }> },
+        { stats?: { sources_active?: number } } | null,
+      ]
       setPendingCount(pendingData.total ?? 0)
       const todayPosts = postedData.posts?.filter(p => p.postedAt && p.postedAt > dayStart).length ?? 0
       setPostedToday(todayPosts)
+      setSourcesActive(healthData?.stats?.sources_active ?? 0)
     } catch (e) {
       console.error('loadStats failed:', e)
     }
@@ -176,7 +183,7 @@ export default function DashboardPage() {
         eventsToday={eventsToday}
         pendingReview={pendingCount}
         postedToday={postedToday}
-        sourcesActive={27}
+        sourcesActive={sourcesActive}
       />
 
       <div>

@@ -24,8 +24,10 @@ const TOPIC_TAGS: Record<string, string[]> = {
   '🛢 Energy':          ['oil price', 'opec', 'crude', 'natural gas', 'lng', 'pipeline', 'energy crisis'],
   '🎵 Entertainment':   ['music', 'album', 'grammy', 'oscar', 'emmy', 'film', 'movie', 'celebrity', 'spotify', 'artist', 'tour'],
   '🏆 Sports':          ['championship', 'nfl', 'nba', 'world cup', 'super bowl', 'playoff', 'transfer', 'premier league', 'olympics', 'ufc'],
-  '🏥 Health/Medical':  ['fda approval', 'vaccine', 'pandemic', 'drug trial', 'clinical', 'who ', 'outbreak', 'public health'],
+  '🏥 Health/Medical':  ['fda approval', 'fda recall', 'recall', 'class i', 'class ii', 'vaccine', 'pandemic', 'drug trial', 'clinical', 'who ', 'outbreak', 'public health'],
   '🌍 Climate':         ['climate', 'emissions', 'carbon', 'cop ', 'renewable', 'net zero', 'wildfire', 'flood', 'drought'],
+  '🛡 Cybersecurity':   ['cisa', 'known exploited vulnerability', 'kev catalog', 'cve', 'vulnerability', 'exploit', 'cyberattack', 'data breach', 'ransomware'],
+  '🌪 Severe Weather':  ['tornado warning', 'hurricane warning', 'severe thunderstorm warning', 'flash flood warning', 'earthquake', 'emergency alert'],
 }
 
 export function extractTopics(title: string, summary: string): string[] {

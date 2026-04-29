@@ -1,7 +1,7 @@
 import { db } from './index'
 import { newsSources, settings } from './schema'
 
-const sources = [
+export const DEFAULT_NEWS_SOURCES = [
   { id: 'reuters_world',    name: 'Reuters World',    url: 'https://feeds.reuters.com/Reuters/worldNews',            category: 'politics',  weight: 10 },
   { id: 'reuters_politics', name: 'Reuters Politics', url: 'https://feeds.reuters.com/reuters/politicsNews',         category: 'politics',  weight: 9  },
   { id: 'guardian_world',   name: 'Guardian World',   url: 'https://www.theguardian.com/world/rss',                  category: 'politics',  weight: 8  },
@@ -31,18 +31,82 @@ const sources = [
   { id: 'marketwatch',      name: 'MarketWatch',      url: 'https://feeds.marketwatch.com/marketwatch/topstories/', category: 'economics', weight: 8  },
   { id: 'axios_markets',    name: 'Axios Markets',    url: 'https://api.axios.com/feed/markets',                     category: 'economics', weight: 8  },
   { id: 'wired',            name: 'Wired',            url: 'https://www.wired.com/feed/rss',                         category: 'tech',      weight: 7  },
-]
+
+  // Primary-source and breaking-data feeds
+  { id: 'fed_press_all',     name: 'Federal Reserve Press Releases', url: 'https://www.federalreserve.gov/feeds/press_all.xml',      category: 'economics', weight: 10 },
+  { id: 'fed_monetary',      name: 'Federal Reserve Monetary Policy', url: 'https://www.federalreserve.gov/feeds/press_monetary.xml', category: 'economics', weight: 10 },
+  { id: 'fed_speeches',      name: 'Federal Reserve Speeches',        url: 'https://www.federalreserve.gov/feeds/speeches.xml',       category: 'economics', weight: 9  },
+  { id: 'fed_testimony',     name: 'Federal Reserve Testimony',       url: 'https://www.federalreserve.gov/feeds/testimony.xml',      category: 'economics', weight: 9  },
+  { id: 'sec_8k_current',    name: 'SEC Current 8-K Filings',         url: 'signaldesk://sec/current?type=8-K&count=100',             category: 'economics', weight: 10 },
+  { id: 'prnewswire_all',    name: 'PR Newswire All Releases',        url: 'https://www.prnewswire.com/rss/news-releases-list.rss',    category: 'economics', weight: 7  },
+  { id: 'cisa_kev',          name: 'CISA Known Exploited Vulnerabilities', url: 'signaldesk://cisa/kev',                              category: 'cyber',     weight: 9  },
+  { id: 'nws_severe_alerts', name: 'National Weather Service Severe Alerts', url: 'signaldesk://nws/severe-alerts',                   category: 'weather',   weight: 8  },
+  { id: 'usgs_quakes_sig',   name: 'USGS Significant Earthquakes',    url: 'signaldesk://usgs/significant-quakes',                   category: 'weather',   weight: 8  },
+  { id: 'openfda_drug_recalls', name: 'openFDA Drug Recalls',         url: 'signaldesk://openfda/enforcement?kind=drug',              category: 'health',    weight: 8  },
+  { id: 'openfda_device_recalls', name: 'openFDA Device Recalls',     url: 'signaldesk://openfda/enforcement?kind=device',            category: 'health',    weight: 8  },
+  { id: 'openfda_food_recalls', name: 'openFDA Food Recalls',         url: 'signaldesk://openfda/enforcement?kind=food',              category: 'health',    weight: 8  },
+
+  // International + wire fallbacks (AP via feedx mirrors faster than Google News wrap)
+  { id: 'feedx_ap',          name: 'AP via feedx',     url: 'https://feedx.net/rss/ap.xml',                          category: 'politics',  weight: 10 },
+  { id: 'euronews',          name: 'Euronews',         url: 'https://www.euronews.com/rss',                          category: 'politics',  weight: 8  },
+  { id: 'time_news',         name: 'Time',             url: 'https://time.com/feed/',                                category: 'politics',  weight: 7  },
+  { id: 'scmp_world',        name: 'SCMP',             url: 'https://www.scmp.com/rss/91/feed/',                     category: 'politics',  weight: 9  },
+  { id: 'cbc_top',           name: 'CBC Top Stories',  url: 'https://www.cbc.ca/webfeed/rss/rss-topstories',         category: 'politics',  weight: 8  },
+  { id: 'toi_top',           name: 'Times of India',   url: 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms', category: 'politics', weight: 8 },
+  { id: 'nikkei_asia',       name: 'Nikkei Asia',      url: 'https://asia.nikkei.com/rss/feed/nar',                  category: 'economics', weight: 9  },
+  { id: 'npr_politics',      name: 'NPR Politics',     url: 'https://feeds.npr.org/1014/rss.xml',                    category: 'politics',  weight: 8  },
+  { id: 'bloomberg_markets', name: 'Bloomberg Markets',url: 'https://feeds.bloomberg.com/markets/news.rss',          category: 'economics', weight: 9  },
+
+  // US government primary sources
+  { id: 'whitehouse_actions',name: 'White House Presidential Actions', url: 'https://www.whitehouse.gov/presidential-actions/feed/', category: 'politics', weight: 10 },
+  { id: 'congress_bills',    name: 'Congress.gov Most-Viewed Bills',   url: 'https://www.congress.gov/rss/most-viewed-bills.xml',    category: 'politics', weight: 8  },
+
+  // Defense
+  { id: 'breaking_defense',  name: 'Breaking Defense', url: 'https://breakingdefense.com/feed/',                     category: 'politics',  weight: 8  },
+
+  // Tech / cyber blogs (CISA KEV above is the official channel; these are faster-moving)
+  { id: 'four04_media',      name: '404 Media',        url: 'https://www.404media.co/rss/',                          category: 'tech',      weight: 8  },
+  { id: 'the_hacker_news',   name: 'The Hacker News',  url: 'https://feeds.feedburner.com/TheHackersNews',           category: 'cyber',     weight: 8  },
+  { id: 'bleepingcomputer',  name: 'BleepingComputer', url: 'https://www.bleepingcomputer.com/feed/',                category: 'cyber',     weight: 9  },
+  { id: 'krebs_security',    name: 'Krebs on Security',url: 'https://krebsonsecurity.com/feed/',                     category: 'cyber',     weight: 9  },
+
+  // Energy / utilities
+  { id: 'utility_dive',      name: 'Utility Dive',     url: 'https://www.utilitydive.com/feeds/news/',               category: 'economics', weight: 7  },
+
+  // Biotech / pharma
+  { id: 'stat_news',         name: 'STAT News',        url: 'https://www.statnews.com/feed/',                        category: 'health',    weight: 9  },
+
+  // Sports — non-ESPN coverage
+  { id: 'the_athletic',      name: 'The Athletic',     url: 'https://www.nytimes.com/athletic/rss/news/',            category: 'sports',    weight: 9  },
+  { id: 'sky_sports',        name: 'Sky Sports News',  url: 'https://www.skysports.com/rss/12040',                   category: 'sports',    weight: 8  },
+
+  // Science / space
+  { id: 'bbc_science',       name: 'BBC Science & Environment', url: 'https://feeds.bbci.co.uk/news/science_and_environment/rss.xml', category: 'science', weight: 7 },
+  { id: 'spacenews',         name: 'SpaceNews',        url: 'https://spacenews.com/feed/',                           category: 'science',   weight: 7  },
+
+  // Entertainment + culture
+  { id: 'variety',           name: 'Variety',                  url: 'https://variety.com/feed/',                                    category: 'entertainment', weight: 8 },
+  { id: 'hollywood_rptr',    name: 'Hollywood Reporter',       url: 'https://www.hollywoodreporter.com/feed/',                      category: 'entertainment', weight: 8 },
+  { id: 'deadline',          name: 'Deadline',                 url: 'https://deadline.com/feed/',                                   category: 'entertainment', weight: 9 },
+  { id: 'tmz',               name: 'TMZ',                      url: 'https://www.tmz.com/rss.xml',                                  category: 'entertainment', weight: 9 },
+  { id: 'page_six',          name: 'Page Six',                 url: 'https://pagesix.com/feed/',                                    category: 'entertainment', weight: 7 },
+  { id: 'bbc_arts',          name: 'BBC Entertainment & Arts', url: 'https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml', category: 'entertainment', weight: 7 },
+
+  // Music
+  { id: 'billboard',         name: 'Billboard',        url: 'https://www.billboard.com/feed/',                       category: 'music',     weight: 7  },
+
+  // Gaming
+  { id: 'gamespot',          name: 'GameSpot News',    url: 'https://www.gamespot.com/feeds/news/',                  category: 'gaming',    weight: 7  },
+] as const
 
 export async function seedIfEmpty() {
-  const existing = db.select().from(newsSources).all()
-  if (existing.length > 0) return  // already seeded
-  await seed()
-  console.log('[startup] DB seeded with default sources')
+  await syncDefaultSources()
 }
 
-async function seed() {
-  // Insert news sources (skip if already exist)
-  for (const source of sources) {
+export async function syncDefaultSources() {
+  // Insert default news sources. Existing rows are left untouched so operators can
+  // keep local enable/disable and weight settings across deploys.
+  for (const source of DEFAULT_NEWS_SOURCES) {
     db.insert(newsSources)
       .values({ ...source, isActive: 1 })
       .onConflictDoNothing()
@@ -68,9 +132,5 @@ async function seed() {
   const sourcesCount = db.select().from(newsSources).all().length
   const settingsCount = db.select().from(settings).all().length
 
-  console.log('✅ Seed complete')
-  console.log(`   news_sources: ${sourcesCount} rows`)
-  console.log(`   settings:     ${settingsCount} row`)
+  console.log(`[startup] default sources synced (${sourcesCount} news_sources, ${settingsCount} settings row)`)
 }
-
-seed().catch(console.error)

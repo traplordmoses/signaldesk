@@ -67,7 +67,7 @@ The old local deployment approach using `pm2` and `npm run dev` has been replace
 
 The production workflow is:
 
-1. RSS ingestion runs every 5 minutes.
+1. News-source ingestion runs every 5 minutes across RSS feeds and selected official API-backed feeds.
 2. New articles are deduplicated, filtered, scored, and clustered into events.
 3. Candidate post generation runs every 15 minutes for qualifying clusters.
 4. Generated posts are stored in SQLite.
@@ -169,8 +169,8 @@ Operational controls are available through the dashboard/settings UI:
 - Daily post limit
 - Post cooldown
 - Lark notification toggle
-- RSS source enable/disable
-- RSS source weights
+- News source enable/disable
+- News source weights
 
 Additional configurability can be added later if operations needs more control:
 
