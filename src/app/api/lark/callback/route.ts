@@ -317,6 +317,21 @@ export async function POST(req: NextRequest) {
       },
     })
 
+    // Diagnostic logging while we trace why some card-update responses don't
+    // visually re-render in the Lark client. Logs the top-level shape and the
+    // first 600 chars of the body so we can verify in `journalctl` exactly
+    // what Lark received.
+    if (callbackValue.action === 'show_edit' || callbackValue.action === 'cancel_edit' || callbackValue.action === 'save_edit') {
+      const json = JSON.stringify(result)
+      console.log(`[lark callback] response shape for ${callbackValue.action}:`, {
+        keys: Object.keys(result),
+        hasCard: 'card' in result,
+        cardType: (result as { card?: { type?: string } }).card?.type,
+        bodyPreview: json.slice(0, 600),
+        bodyBytes: json.length,
+      })
+    }
+
     return NextResponse.json(result)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
