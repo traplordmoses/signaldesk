@@ -16,14 +16,40 @@ const TIER3 = [
   'quarterly results', 'announced', 'confirmed', 'signed', 'reportedly',
 ]
 
-const HIGH_RISK = [
-  'death', 'killed', 'casualties', 'shooting', 'bombing', 'nuclear',
-  'assassination', 'sec charges', 'doj', 'criminal', 'attack',
+// TRAGEDY — auto-skip from generation. Keep this list narrow and unambiguous:
+// the bot must NEVER auto-write competing content during an active tragedy.
+// Keywords picked so they almost always indicate literal violence or loss of
+// life in news headlines (false positives like "killed it on stage" are
+// vanishingly rare in actual breaking-news writing).
+const TRAGEDY = [
+  'killed', 'casualties', 'victims', 'fatalities',
+  'shooting', 'bombing',
+  'terror', 'terrorist',
+  'hostage', 'massacre',
 ]
 
-const MEDIUM_RISK = [
-  'political', 'election', 'lawsuit', 'controversy', 'scandal', 'protest',
-  'conflict', 'legal', 'reportedly',
+// HIGH_STAKES — show ⚠️ warning on the review card but still generate. These
+// are legitimate prediction-market-relevant breaking stories (Iran nuclear
+// talks, Trump indictments, DOJ moves, SEC charges, election results) that
+// the bot exists precisely to surface. Previously they were auto-skipped,
+// which meant the King Charles "nuclear weapon ban" cluster — a textbook
+// high-stakes geopolitical story — got blocked by the same "nuclear"
+// keyword that was simultaneously boosting it to the top of the score list.
+// Reviewer judgement is the right gate here, not a hard block.
+const HIGH_STAKES = [
+  // legal / DOJ / financial enforcement
+  'doj', 'sec charges', 'criminal', 'indicted', 'arrested',
+  'lawsuit', 'legal', 'conviction', 'guilty verdict',
+
+  // geopolitical high-stakes (newsworthy, rarely tragic in framing)
+  'nuclear', 'sanctions', 'assassination', 'attack',
+
+  // sensitive but routine in news: prefer human review over auto-skip
+  'death',
+
+  // political heat (kept from the old MEDIUM_RISK list)
+  'political', 'election', 'controversy', 'scandal', 'protest',
+  'conflict',
 ]
 
 // Word-boundary keyword matching. `text.includes('doj')` would hit any string
@@ -75,12 +101,14 @@ export function detectRisk(text: string): { level: 'low' | 'medium' | 'high'; re
   const lower = text.toLowerCase()
   const reasons: string[] = []
 
-  for (const kw of HIGH_RISK) {
+  // Tier 1: tragedy → auto-skip
+  for (const kw of TRAGEDY) {
     if (wordBoundaryMatch(lower, kw)) reasons.push(kw)
   }
   if (reasons.length > 0) return { level: 'high', reasons }
 
-  for (const kw of MEDIUM_RISK) {
+  // Tier 2: high-stakes news → warn-only, still generates
+  for (const kw of HIGH_STAKES) {
     if (wordBoundaryMatch(lower, kw)) reasons.push(kw)
   }
   if (reasons.length > 0) return { level: 'medium', reasons }
