@@ -305,30 +305,18 @@ export async function generateSmartPosts(cluster: Cluster) {
     return []
   }
 
-  const score = cluster.relevanceScore ?? 0
+  // Auto-generation is locked to a single pure_news post per cluster.
+  // The team's content strategy is "BREAKING / JUST IN" news summaries with no
+  // platform names, no probabilities, no forced-choice questions. The other
+  // modes (news_odds, engagement) remain available via the manual
+  // /api/posts/generate endpoint with an explicit mode override, but the
+  // 15-min auto-generate cron always emits pure_news.
   const posts: (typeof generatedPosts.$inferSelect)[] = []
-
-  if (score >= 8) {
-    // Very high priority: generate pure_news (speed) + AI-chosen best mode
-    for (const hint of ['pure_news', undefined] as (ContentMode | undefined)[]) {
-      try {
-        const post = await generatePost(cluster, hint)
-        // Avoid duplicate modes
-        if (!posts.find(p => p.contentMode === post.contentMode)) {
-          posts.push(post)
-        }
-      } catch (e) {
-        console.error(`Failed to generate post for cluster ${cluster.id}:`, e)
-      }
-    }
-  } else {
-    // Medium priority: 1 AI-chosen post
-    try {
-      const post = await generatePost(cluster)
-      posts.push(post)
-    } catch (e) {
-      console.error(`Failed to generate post for cluster ${cluster.id}:`, e)
-    }
+  try {
+    const post = await generatePost(cluster, 'pure_news')
+    posts.push(post)
+  } catch (e) {
+    console.error(`Failed to generate post for cluster ${cluster.id}:`, e)
   }
 
   // Status update — critical for preventing re-pick by the cron candidate query.

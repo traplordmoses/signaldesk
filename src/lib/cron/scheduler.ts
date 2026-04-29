@@ -2,6 +2,7 @@ import cron from 'node-cron'
 import { db, sqlite } from '@/lib/db'
 import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
 import { eq, and, gt, isNull } from 'drizzle-orm'
+import { isWorthyHeadline } from '@/lib/ai/headline-filter'
 
 let started = false
 
@@ -76,7 +77,7 @@ async function runAutoGenerate() {
     const threshold = config?.autoGenerateThreshold ?? 6.5
     const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000
 
-    const candidates = db.select()
+    const rawCandidates = db.select()
       .from(eventClusters)
       .where(
         and(
@@ -88,9 +89,31 @@ async function runAutoGenerate() {
       .all()
       .filter(c => (c.relevanceScore ?? 0) >= threshold)
 
-    if (candidates.length === 0) return
+    // Pre-LLM headline filter — drops opinion pieces, recaps, podcasts, etc.
+    // before they cost an Anthropic call. Skipped clusters are marked
+    // 'low_signal_skipped' so they don't re-qualify on the next tick.
+    const candidates = []
+    let skippedLowSignal = 0
+    for (const c of rawCandidates) {
+      if (isWorthyHeadline(c.canonicalHeadline)) {
+        candidates.push(c)
+      } else {
+        skippedLowSignal++
+        db.update(eventClusters)
+          .set({ status: 'low_signal_skipped', lastUpdatedAt: Date.now() })
+          .where(eq(eventClusters.id, c.id))
+          .run()
+      }
+    }
 
-    console.log(`[cron] auto-generate: ${candidates.length} candidates`)
+    if (candidates.length === 0) {
+      if (skippedLowSignal > 0) {
+        console.log(`[cron] auto-generate: 0 candidates (${skippedLowSignal} skipped as low-signal)`)
+      }
+      return
+    }
+
+    console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}`)
 
     const { generateSmartPosts } = await import('@/lib/ai/generator')
 
