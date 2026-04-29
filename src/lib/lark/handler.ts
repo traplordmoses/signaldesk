@@ -28,6 +28,41 @@ interface CallbackPayload {
   }
 }
 
+/**
+ * Audit-log a click as soon as it lands, before any downstream side effect.
+ * If the approve/reject/save flow later throws, we still have an immutable
+ * record of WHO clicked WHAT and WHEN — useful for postmortems and for
+ * tracing if a "this post should never have gone out" question ever comes
+ * up later. Captures both the human-readable name AND the open_id so we can
+ * always identify the Lark user, regardless of name collisions or display
+ * name changes.
+ */
+function logActionClick(
+  actionType: string,
+  operator: { open_id: string; name?: string },
+  postId: string | undefined,
+  clusterId: string | undefined,
+): void {
+  try {
+    db.insert(auditLog).values({
+      id: crypto.randomUUID(),
+      eventType: `click_${actionType}`,
+      entityType: postId ? 'generated_post' : 'system',
+      entityId: postId ?? 'singleton',
+      actor: operator.name ?? operator.open_id,
+      details: JSON.stringify({
+        operatorOpenId: operator.open_id,
+        operatorName: operator.name ?? null,
+        clusterId: clusterId ?? null,
+      }),
+      createdAt: Date.now(),
+    }).run()
+  } catch (e) {
+    // Audit-log failure shouldn't kill the action — log it and continue.
+    console.error(`audit log click write failed (${actionType}, post=${postId}):`, e)
+  }
+}
+
 // Lark Schema 2.0 callback response. The legacy v1 `code` field is omitted
 // from card-update responses — including it appears to make Lark's client
 // interpret the response as v1 legacy and silently drop the `card` update.
@@ -40,6 +75,10 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   const { postId, action: actionType } = action.value
   const actorName = operator.name ?? operator.open_id
   const messageId = context.open_message_id
+
+  // First thing we do on every click — record it. Captures the operator's
+  // open_id even if downstream side effects later throw or no-op.
+  logActionClick(actionType, operator, postId, undefined)
 
   // Pause / resume don't need a postId
   if (actionType === 'pause_bot' || actionType === 'resume_bot') {
@@ -133,7 +172,12 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         entityType: 'generated_post',
         entityId: postId,
         actor: actorName,
-        details: JSON.stringify({ clusterId: cluster.id, landedIn }),
+        details: JSON.stringify({
+          clusterId: cluster.id,
+          landedIn,
+          operatorOpenId: operator.open_id,
+          operatorName: operator.name ?? null,
+        }),
         createdAt: Date.now(),
       }).run()
     } catch (err) {
@@ -171,7 +215,11 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         entityType: 'generated_post',
         entityId: postId,
         actor: actorName,
-        details: JSON.stringify({ clusterId: cluster.id }),
+        details: JSON.stringify({
+          clusterId: cluster.id,
+          operatorOpenId: operator.open_id,
+          operatorName: operator.name ?? null,
+        }),
         createdAt: Date.now(),
       }).run()
     } catch (err) {
@@ -223,7 +271,12 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         entityType: 'generated_post',
         entityId: postId,
         actor: actorName,
-        details: JSON.stringify({ clusterId: cluster.id, charCount: editedContent.length }),
+        details: JSON.stringify({
+          clusterId: cluster.id,
+          charCount: editedContent.length,
+          operatorOpenId: operator.open_id,
+          operatorName: operator.name ?? null,
+        }),
         createdAt: Date.now(),
       }).run()
 
