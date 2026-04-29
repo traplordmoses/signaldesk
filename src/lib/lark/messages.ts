@@ -199,24 +199,17 @@ export function buildReviewCard(
   let topics: string[] = []
   try { topics = JSON.parse(cluster.topics ?? '[]') } catch { topics = [] }
 
-  // ── Header block — single condensed metadata line per row ─────────────
+  // ── Header block — condensed metadata. Schema 2.0 doesn't support the
+  // `note` element (Lark API error 200861: "cards of schema V2 no longer
+  // support this capability; unsupported tag note"). Using markdown rows
+  // with italic / bold formatting for the same visual hierarchy.
   elements.push(md(`**${cluster.canonicalHeadline}**`))
 
   const sourceLine = sourceNames.length > 0 ? sourceNames.join(' · ') : 'Unknown source'
-  elements.push({
-    tag: 'note',
-    elements: [
-      plainText(`🕐 ${timeAgo} (${absTime})  ·  📰 ${sourceLine}`),
-    ],
-  })
+  elements.push(md(`🕐 **${timeAgo}** (${absTime})  ·  📰 ${sourceLine}`))
 
   const allTags = [categoryLabel, ...topics.map(englishTag)]
-  elements.push({
-    tag: 'note',
-    elements: [
-      plainText(`${allTags.join('  ·  ')}  ·  Score ${(cluster.relevanceScore ?? 0).toFixed(1)}/10`),
-    ],
-  })
+  elements.push(md(`${allTags.join('  ·  ')}  ·  Score **${(cluster.relevanceScore ?? 0).toFixed(1)}**/10`))
 
   // Risk warning — only when actually elevated
   if (cluster.riskLevel === 'high') {
@@ -244,10 +237,7 @@ export function buildReviewCard(
 
     if (isEditing) {
       // ── Edit mode ────────────────────────────────────────────────────
-      elements.push({
-        tag: 'note',
-        elements: [plainText('Edit the wording below, then Save (or Cancel to discard).')],
-      })
+      elements.push(md('_Edit the wording below, then Save (or Cancel to discard)._'))
       elements.push({
         tag: 'form',
         name: `edit_form_${post.id}`,
