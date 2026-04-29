@@ -1,7 +1,22 @@
 export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
-import { createHash } from 'crypto'
+import { createDecipheriv, createHash } from 'crypto'
 import { handleLarkCallback } from '@/lib/lark/handler'
+
+// Lark encrypts the entire callback body when "Encryption Strategy" is on.
+// Format: { "encrypt": "<base64>" } where the decoded buffer is
+// 16 bytes IV + AES-256-CBC ciphertext, and the AES key is SHA-256 of
+// the encryption-key string configured in the dev console.
+function decryptLarkBody(encrypted: string, encryptionKey: string): string {
+  const buf = Buffer.from(encrypted, 'base64')
+  if (buf.length <= 16) throw new Error('encrypted body too short')
+  const iv = buf.subarray(0, 16)
+  const ciphertext = buf.subarray(16)
+  const key = createHash('sha256').update(encryptionKey).digest()
+  const decipher = createDecipheriv('aes-256-cbc', key, iv)
+  const out = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+  return out.toString('utf8')
+}
 
 const TIMESTAMP_FRESHNESS_SEC = 5 * 60       // accept timestamps within ±5 min
 const NONCE_RETENTION_MS = 6 * 60 * 1000     // remember nonces for 6 min (5 min window + buffer)
@@ -130,6 +145,28 @@ export async function POST(req: NextRequest) {
     parsed = JSON.parse(bodyText) as Record<string, unknown>
   } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+  }
+
+  // If the dev console has "Encryption Strategy" enabled, every inbound body
+  // (including the URL-verification challenge) arrives as { "encrypt": "<b64>" }
+  // and we need to decrypt before doing anything else. Without the key set, we
+  // fail closed — accepting an undecrypted body would mean either accepting
+  // garbage or accepting an attacker who guessed the structure.
+  if (typeof parsed.encrypt === 'string') {
+    const encryptKey = process.env.LARK_ENCRYPTION_KEY
+    if (!encryptKey) {
+      return NextResponse.json(
+        { error: 'Server not configured (LARK_ENCRYPTION_KEY)' },
+        { status: 500 },
+      )
+    }
+    try {
+      const plaintext = decryptLarkBody(parsed.encrypt, encryptKey)
+      parsed = JSON.parse(plaintext) as Record<string, unknown>
+    } catch (e) {
+      console.error('lark callback: decrypt failed:', (e as Error).message)
+      return NextResponse.json({ error: 'Decryption failed' }, { status: 401 })
+    }
   }
 
   // URL verification challenge — Lark sends this WITHOUT signature headers when

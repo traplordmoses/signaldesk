@@ -4,7 +4,7 @@
  * pre-patch code allowed.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createHash } from 'crypto'
+import { createCipheriv, createHash, randomBytes } from 'crypto'
 
 vi.mock('@/lib/lark/handler', () => ({
   handleLarkCallback: vi.fn(async () => ({ code: 0, message: 'ok' })),
@@ -16,6 +16,16 @@ const { POST } = await import('./route')
 
 const SECRET = 'test-secret-do-not-use-in-prod'
 const VERIFY_TOKEN = 'test-verification-token-do-not-use'
+const ENCRYPT_KEY = 'test-encryption-key-do-not-use'
+
+// Mirror of the production decryptLarkBody for test fixture generation.
+function encryptForLark(plaintext: string, encryptionKey: string): string {
+  const key = createHash('sha256').update(encryptionKey).digest()
+  const iv = randomBytes(16)
+  const cipher = createCipheriv('aes-256-cbc', key, iv)
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+  return Buffer.concat([iv, ciphertext]).toString('base64')
+}
 
 function makeRequest(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request('http://localhost/api/lark/callback', {
@@ -202,6 +212,42 @@ describe('POST /api/lark/callback — signature verification', () => {
     const res = await POST(makeRequest(bodyText) as any)
     expect(res.status).toBe(200)
     expect(handleLarkCallback).not.toHaveBeenCalled()
+  })
+
+  it('fails closed (500) when encrypted body arrives but LARK_ENCRYPTION_KEY is unset', async () => {
+    delete process.env.LARK_ENCRYPTION_KEY
+    const res = await POST(makeRequest({ encrypt: 'irrelevant-base64-blob' }) as any)
+    expect(res.status).toBe(500)
+    expect((await res.json()).error).toMatch(/LARK_ENCRYPTION_KEY/i)
+  })
+
+  it('decrypts encrypted Schema 2.0 callbacks and dispatches', async () => {
+    process.env.LARK_ENCRYPTION_KEY = ENCRYPT_KEY
+    const inner = schema2Body({
+      eventType: 'card.action.trigger',
+      event: {
+        action: { value: { action: 'approve', postId: 'p-encrypted' } },
+        operator: { user_id: { open_id: 'ou-encrypted' }, user_name: 'Reviewer' },
+        context: { open_message_id: 'om-encrypted' },
+      },
+    })
+    const outer = JSON.stringify({ encrypt: encryptForLark(inner, ENCRYPT_KEY) })
+    const res = await POST(makeRequest(outer) as any)
+    expect(res.status).toBe(200)
+    expect(handleLarkCallback).toHaveBeenCalledWith({
+      action: { value: { action: 'approve', postId: 'p-encrypted' } },
+      operator: { open_id: 'ou-encrypted', name: 'Reviewer' },
+      context: { open_message_id: 'om-encrypted' },
+    })
+  })
+
+  it('rejects (401) when decryption fails (wrong key)', async () => {
+    process.env.LARK_ENCRYPTION_KEY = 'totally-different-key'
+    const inner = schema2Body({ eventType: 'card.action.trigger' })
+    const outer = JSON.stringify({ encrypt: encryptForLark(inner, ENCRYPT_KEY) })
+    const res = await POST(makeRequest(outer) as any)
+    expect(res.status).toBe(401)
+    expect((await res.json()).error).toMatch(/decrypt/i)
   })
 
   it('rejects replays of an already-seen nonce', async () => {
