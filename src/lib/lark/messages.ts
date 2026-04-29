@@ -172,22 +172,29 @@ function threeColumnButtons(left: object, middle: object, right: object) {
 /**
  * Build the review card.
  *
- * Two render modes per post, controlled by `editingPostId`:
- *   - read-only (default): just the tweet quote and [Approve][Reject][Edit]
- *     buttons. The textbox is hidden — reviewers who want to approve as-is
- *     do it in two clicks (read → approve), no form-filling vibe.
- *   - edit mode (only when post.id === editingPostId): the textbox appears
- *     pre-filled with the current content, plus [Save edit][Cancel] and the
- *     usual [Approve][Reject] buttons. Triggered by clicking Edit; the
- *     handler patches the card to swap in this view.
+ * Layout:
+ *   - cluster headline + metadata (always visible)
+ *   - tweet quote (always visible, read-only display)
+ *   - Approve / Reject buttons (always visible, primary actions)
+ *   - "Edit wording" collapsible panel (default collapsed) containing
+ *     the textbox + Save edit button
  *
- * Multi-post clusters (rare under the pure_news lock) render each post
- * independently — only the post that was clicked enters edit mode.
+ * The collapsible panel is a Schema 2.0 client-side toggle — expand /
+ * collapse happens locally in the Lark client, no callback needed.
+ * Crucially, all interactive elements (Approve, Reject, Save edit, the
+ * input) are present in the card from send-time, so Lark's client binds
+ * them as actionable. The previous "show_edit toggles a form into the
+ * card via update" approach left dynamically-added buttons silently
+ * unbound — they rendered but didn't fire callbacks.
+ *
+ * The `editingPostId` parameter is retained for back-compat with old
+ * code paths but is no longer used to switch render modes; all posts
+ * render the same card shape regardless of its value.
  */
 export function buildReviewCard(
   cluster: EventCluster,
   posts: GeneratedPost[],
-  opts: { editingPostId?: string } = {},
+  _opts: { editingPostId?: string } = {},
 ): object {
   const elements: object[] = []
 
@@ -224,7 +231,6 @@ export function buildReviewCard(
     const displayContent = isPureNews
       ? post.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
       : post.content
-    const isEditing = opts.editingPostId === post.id
 
     elements.push({ tag: 'hr' })
 
@@ -235,46 +241,50 @@ export function buildReviewCard(
     const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
 
-    if (isEditing) {
-      // ── Edit mode ────────────────────────────────────────────────────
-      elements.push(md('_Edit the wording below, then Save (or Cancel to discard)._'))
-      elements.push({
-        tag: 'form',
-        name: `edit_form_${post.id}`,
-        elements: [
-          {
-            tag: 'input',
-            name: `edited_content_${post.id}`,
-            input_type: 'multiline_text',
-            rows: 3,
-            default_value: displayContent,
-            placeholder: plainText('Edited tweet text'),
-          },
-          callbackButton({
-            text: '💾 Save edit',
-            type: 'primary',
-            action: 'save_edit',
-            postId: post.id,
-            formSubmit: true,
-          }),
-        ],
-      })
-      elements.push(threeColumnButtons(
-        callbackButton({ text: '↩️ Cancel', type: 'default', action: 'cancel_edit', postId: post.id }),
-        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve',    postId: post.id }),
-        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',     postId: post.id }),
-      ))
-    } else {
-      // ── Read-only mode (default) ─────────────────────────────────────
-      // 3-column action row: green | gray | red. Visually balanced —
-      // Approve is primary, Reject is danger, Edit sits between as a
-      // neutral secondary action.
-      elements.push(threeColumnButtons(
-        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve',    postId: post.id }),
-        callbackButton({ text: '✏️ Edit',    type: 'default', action: 'show_edit',  postId: post.id }),
-        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',     postId: post.id }),
-      ))
-    }
+    // Primary actions: Approve / Reject. Both bound at send-time so
+    // clicks always fire reliably.
+    elements.push(twoColumnButtons(
+      callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
+      callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
+    ))
+
+    // Edit affordance: a Schema 2.0 collapsible_panel. Default collapsed,
+    // so the card visually leads with the read-only quote + primary
+    // actions. Reviewer clicks the panel header to expand and reveal the
+    // textbox + Save edit button. The form lives inside the original
+    // card structure, so the Save button is bound to fire callbacks
+    // reliably (unlike dynamically-added buttons via card update).
+    elements.push({
+      tag: 'collapsible_panel',
+      expanded: false,
+      header: {
+        title: md('✏️ **Edit wording** _(optional — click to expand)_'),
+      },
+      elements: [
+        {
+          tag: 'form',
+          name: `edit_form_${post.id}`,
+          elements: [
+            {
+              tag: 'input',
+              // Lark requires globally-unique input names across the whole card.
+              name: `edited_content_${post.id}`,
+              input_type: 'multiline_text',
+              rows: 3,
+              default_value: displayContent,
+              placeholder: plainText('Edited tweet text — then click Save edit'),
+            },
+            callbackButton({
+              text: '💾 Save edit',
+              type: 'primary',
+              action: 'save_edit',
+              postId: post.id,
+              formSubmit: true,
+            }),
+          ],
+        },
+      ],
+    })
   }
 
   // Pause bot at the bottom
