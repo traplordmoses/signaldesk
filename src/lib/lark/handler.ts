@@ -3,6 +3,7 @@ import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/sche
 import { eq } from 'drizzle-orm'
 import {
   updateGroupCard,
+  updateReviewCardMode,
   buildReviewCard,
   sendApprovalDM,
   sendApprovalThreadReply,
@@ -116,19 +117,32 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
       .from(generatedPosts)
       .where(eq(generatedPosts.clusterId, cluster.id))
       .all()
-    const card = buildReviewCard(cluster, clusterPosts, {
-      editingPostId: actionType === 'show_edit' ? postId : undefined,
-    })
-    // Schema 2.0 inline card-update response shape — `{ toast, card }` per
-    // docs, no top-level `code`. Toast is informational; the actual update
-    // happens via card.type='raw'.
+    const editingPostId = actionType === 'show_edit' ? postId : undefined
+
+    // Two-pronged update:
+    //   1. larkPatch (await) — replaces the message server-side. Critical
+    //      for binding the buttons in the new card structure (the form +
+    //      Save edit button) to live callbacks. Without this, the visual
+    //      update happens but the buttons silently don't fire callbacks
+    //      when clicked.
+    //   2. inline `card.type:'raw'` response — gives immediate visual
+    //      feedback so the reviewer doesn't see a render delay.
+    try {
+      await updateReviewCardMode(messageId, cluster, clusterPosts, editingPostId)
+    } catch (err) {
+      // Patch failure is non-fatal — the inline response will still update
+      // visually, just buttons in the new state may not fire. Log so we can
+      // diagnose if save_edit goes silent again.
+      console.error(`[lark callback] ${actionType} patchCard failed (non-fatal):`, (err as Error).message)
+    }
+
+    const card = buildReviewCard(cluster, clusterPosts, { editingPostId })
     const response = {
       toast: { type: 'info', content: actionType === 'show_edit' ? 'Editing…' : 'Edit cancelled' },
       card: { type: 'raw' as const, data: card },
     }
-    console.log(`[lark callback] ${actionType} → returning inline card update`, {
+    console.log(`[lark callback] ${actionType} → patched + returning inline card update`, {
       postId,
-      cardKeys: Object.keys(card),
       hasForm: actionType === 'show_edit',
     })
     return response
@@ -280,15 +294,22 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         createdAt: Date.now(),
       }).run()
 
-      // Re-render the review card inline (read-only, with the new content).
-      // Same atomic mechanism as show_edit / cancel_edit — sidesteps the
-      // silent no-op that the separate larkPatch path can hit when a card's
-      // structure changes between sends.
+      // Two-pronged update: patchCard server-side (so the Approve button
+      // in the post-save read-only card is properly bound) + inline card
+      // response for immediate visual feedback. Same lesson as show_edit:
+      // inline alone leaves the next round of buttons un-bound.
       const clusterPosts = db.select()
         .from(generatedPosts)
         .where(eq(generatedPosts.clusterId, cluster.id))
         .all()
       const card = buildReviewCard(cluster, clusterPosts)
+
+      try {
+        await updateReviewCardMode(messageId, cluster, clusterPosts)
+      } catch (err) {
+        console.error('[lark callback] save_edit patchCard failed (non-fatal):', (err as Error).message)
+      }
+
       return {
         toast: { type: 'success', content: 'Edit saved.' },
         card: { type: 'raw', data: card },
