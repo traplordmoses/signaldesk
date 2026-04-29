@@ -454,6 +454,18 @@ export async function sendApprovalDM(openId: string, post: GeneratedPost): Promi
   })
 }
 
+// Fallback for when sendApprovalDM fails (typically: reviewer has never opened
+// a chat with the bot, so Lark refuses receive_id_type=open_id). Posts the same
+// approval card as a threaded reply on the original review card so the action
+// stays visible right next to the cluster the reviewer just approved.
+export async function sendApprovalThreadReply(parentMessageId: string, post: GeneratedPost): Promise<void> {
+  const card = buildApprovalDMCard(post)
+  await larkPost(`/im/v1/messages/${parentMessageId}/reply`, {
+    msg_type: 'interactive',
+    content: JSON.stringify(card),
+  })
+}
+
 export async function sendBotStatusToGroup(paused: boolean): Promise<void> {
   const chatId = process.env.LARK_REVIEW_CHAT_ID
   if (!chatId) return

@@ -1,7 +1,16 @@
 import { db, sqlite } from '@/lib/db'
 import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/schema'
 import { eq } from 'drizzle-orm'
-import { updateGroupCard, updateGroupCardEdited, sendApprovalDM, sendEditDM, sendSavedEditDM, updateEditDM, sendBotStatusToGroup } from './messages'
+import {
+  updateGroupCard,
+  updateGroupCardEdited,
+  sendApprovalDM,
+  sendApprovalThreadReply,
+  sendEditDM,
+  sendSavedEditDM,
+  updateEditDM,
+  sendBotStatusToGroup,
+} from './messages'
 
 interface ActionValue {
   action: 'approve' | 'reject' | 'edit' | 'save_edit' | 'pause_bot' | 'resume_bot'
@@ -56,6 +65,7 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   if (!cluster) return { code: 1 }
 
   if (actionType === 'approve') {
+    let landedIn: 'dm' | 'thread' | 'none' = 'none'
     try {
       db.update(generatedPosts)
         .set({ status: 'approved', reviewedBy: actorName, updatedAt: Date.now() })
@@ -63,7 +73,30 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         .run()
 
       await updateGroupCard(messageId, cluster, post, actorName, true)
-      await sendApprovalDM(operator.open_id, post)
+
+      // Try DM first. Fall back to threaded group reply if the reviewer has
+      // never opened a chat with the bot (Lark returns code 230020 etc).
+      try {
+        await sendApprovalDM(operator.open_id, post)
+        landedIn = 'dm'
+      } catch (dmErr) {
+        console.warn(`approval DM failed (post=${postId}): ${(dmErr as Error).message} — falling back to thread reply`)
+        try {
+          db.insert(auditLog).values({
+            id: crypto.randomUUID(),
+            eventType: 'fallback',
+            entityType: 'generated_post',
+            entityId: postId,
+            errorCode: 'APPROVE_DM_FALLBACK',
+            errorMessage: (dmErr as Error).message,
+            createdAt: Date.now(),
+          }).run()
+        } catch (e) {
+          console.error(`audit log write failed (approve fallback, post=${postId}):`, e)
+        }
+        await sendApprovalThreadReply(messageId, post)
+        landedIn = 'thread'
+      }
 
       db.insert(auditLog).values({
         id: crypto.randomUUID(),
@@ -71,7 +104,7 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         entityType: 'generated_post',
         entityId: postId,
         actor: actorName,
-        details: JSON.stringify({ clusterId: cluster.id }),
+        details: JSON.stringify({ clusterId: cluster.id, landedIn }),
         createdAt: Date.now(),
       }).run()
     } catch (err) {
@@ -87,7 +120,11 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
       }).run()
     }
 
-    return { code: 0, toast: { type: 'success', content: 'Post approved! Check your DMs.' } }
+    const toastContent =
+      landedIn === 'thread' ? 'Post approved! Open the thread reply to publish.'
+      : landedIn === 'dm'   ? 'Post approved! Check your DMs.'
+      :                       'Post approved!'
+    return { code: 0, toast: { type: 'success', content: toastContent } }
   }
 
   if (actionType === 'reject') {
@@ -125,6 +162,12 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   }
 
   if (actionType === 'edit') {
+    // The edit flow REQUIRES a private DM channel because the user replies with
+    // the edited draft as a text message that handleLarkMessage matches back to
+    // the most recent edit_requested audit row. A threaded reply doesn't provide
+    // that round-trip, so if the DM fails we tell the user how to unblock
+    // themselves rather than silently dropping the request.
+    let dmFailed = false
     try {
       await sendEditDM(operator.open_id, post)
       db.insert(auditLog).values({
@@ -138,6 +181,7 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
       }).run()
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
+      dmFailed = true
       db.insert(auditLog).values({
         id: crypto.randomUUID(),
         eventType: 'error',
@@ -149,7 +193,15 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
       }).run()
     }
 
-    return { code: 0, toast: { type: 'info', content: 'Check your DMs, then reply with the edited draft.' } }
+    return {
+      code: 0,
+      toast: {
+        type: dmFailed ? 'warning' : 'info',
+        content: dmFailed
+          ? 'Edit unavailable — open a DM with this bot first (send any message), then click Edit again.'
+          : 'Check your DMs, then reply with the edited draft.',
+      },
+    }
   }
 
   if (actionType === 'save_edit') {
