@@ -191,30 +191,39 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
     elements.push({ tag: 'hr' })
     elements.push(md(`**${badge}** ${isPureNews ? '_(no link — tweet only)_' : ''}  ·  Score: ${post.estimatedScore ?? 'N/A'}/10`))
 
-    // Quote display (current saved content)
+    // Read-only display of the proposed tweet — this is what reviewers read
+    // 90% of the time before clicking Approve. Quote-style for readability.
     const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
     elements.push(md(`_${displayContent.length}/280 chars_`))
 
-    // Inline edit form: input + Save button. Editing here and clicking Save
-    // submits `form_value.edited_content` along with the action callback,
-    // which the route's `extractFormString` picks up and forwards to handler
-    // as `editedContent`. handler.ts:save_edit applies it to the DB.
+    // Primary actions FIRST — most reviews skip the edit step entirely.
+    // Putting Approve/Reject before the edit form makes the common path
+    // a one-click action instead of looking like the card is asking you
+    // to fill in a form.
+    elements.push(twoColumnButtons(
+      callbackButton({ text: '✅ Approve & Copy', type: 'primary', action: 'approve', postId: post.id }),
+      callbackButton({ text: '❌ Reject',          type: 'danger',  action: 'reject',  postId: post.id }),
+    ))
+
+    // Secondary inline-edit affordance. Reviewer types in the box and presses
+    // Save edit if they want to tweak wording before approving. Submits
+    // `form_value.edited_content_<postId>` with the action callback, which
+    // route.ts:extractFormString resolves into action.value.editedContent.
+    elements.push(md('_Tweak wording? Edit below and press Save, then Approve._'))
     elements.push({
       tag: 'form',
       name: `edit_form_${post.id}`,
       elements: [
         {
           tag: 'input',
-          // Lark requires globally-unique input names across the entire card.
-          // Multi-post clusters (BREAKING + JUST IN) put multiple forms on one
-          // card, so scope the input name by post id. The route handler reads
-          // it back via the same post-scoped key (see callback/route.ts).
+          // Lark requires globally-unique input names across the whole card.
+          // Scoped per post for safety even on single-post cards.
           name: `edited_content_${post.id}`,
           input_type: 'multiline_text',
-          rows: 4,
+          rows: 3,
           default_value: displayContent,
-          placeholder: plainText('Type to edit, then press 💾 Save edit'),
+          placeholder: plainText('Edited tweet text'),
         },
         callbackButton({
           text: '💾 Save edit',
@@ -225,12 +234,6 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
         }),
       ],
     })
-
-    // Approve / Reject row — outside the form so they don't trigger Save logic.
-    elements.push(twoColumnButtons(
-      callbackButton({ text: '✅ Approve & Copy', type: 'primary', action: 'approve', postId: post.id }),
-      callbackButton({ text: '❌ Reject',          type: 'danger',  action: 'reject',  postId: post.id }),
-    ))
   }
 
   // Pause bot at the bottom
