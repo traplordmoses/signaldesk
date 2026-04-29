@@ -36,7 +36,27 @@ export async function getTenantAccessToken(): Promise<string> {
   return tokenCache.token
 }
 
-export async function larkPost(path: string, body: unknown): Promise<{ code: number; msg: string; data?: unknown }> {
+// Lark routinely returns HTTP 200 with `{ code: <non-zero>, msg: "..." }` for
+// app-level failures (permission denied, bot not in chat with user, message not
+// found, rate limited, etc.). The original helpers ignored `code` entirely, so
+// approve→DM, card patches, and many other operations failed silently — the
+// reviewer saw the toast but the followup card never landed. Centralizing the
+// check here makes every Lark API failure visible to the per-action try/catch
+// in handler.ts, which then writes a typed audit_log row.
+
+interface LarkApiResponse {
+  code: number
+  msg: string
+  data?: unknown
+}
+
+function assertLarkOk(path: string, data: LarkApiResponse): void {
+  if (data.code !== 0) {
+    throw new Error(`Lark API ${path} failed: code=${data.code} msg=${data.msg}`)
+  }
+}
+
+export async function larkPost(path: string, body: unknown): Promise<LarkApiResponse> {
   const token = await getTenantAccessToken()
 
   const res = await fetch(`${LARK_BASE}${path}`, {
@@ -49,10 +69,12 @@ export async function larkPost(path: string, body: unknown): Promise<{ code: num
   })
 
   if (!res.ok) throw new Error(`Lark API error ${res.status}: ${await res.text()}`)
-  return res.json() as Promise<{ code: number; msg: string; data?: unknown }>
+  const data = await res.json() as LarkApiResponse
+  assertLarkOk(path, data)
+  return data
 }
 
-export async function larkPatch(path: string, body: unknown): Promise<{ code: number; msg: string }> {
+export async function larkPatch(path: string, body: unknown): Promise<LarkApiResponse> {
   const token = await getTenantAccessToken()
 
   const res = await fetch(`${LARK_BASE}${path}`, {
@@ -65,5 +87,7 @@ export async function larkPatch(path: string, body: unknown): Promise<{ code: nu
   })
 
   if (!res.ok) throw new Error(`Lark PATCH error ${res.status}: ${await res.text()}`)
-  return res.json() as Promise<{ code: number; msg: string }>
+  const data = await res.json() as LarkApiResponse
+  assertLarkOk(path, data)
+  return data
 }
