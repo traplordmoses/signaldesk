@@ -143,40 +143,82 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ challenge: parsed.challenge })
   }
 
-  // After URL verification, every callback MUST be signed.
-  const appSecret = process.env.LARK_APP_SECRET
-  if (!appSecret) {
-    // Server misconfiguration — fail closed instead of accepting unsigned callbacks.
-    return NextResponse.json({ error: 'Server not configured' }, { status: 500 })
-  }
+  // After URL verification, every callback MUST be authenticated. Lark uses two
+  // different schemes:
+  //   - Legacy (Schema 1.0 / *_v1 callbacks): x-lark-signature header signed
+  //     with LARK_APP_SECRET, plus x-lark-request-timestamp + nonce.
+  //   - Schema 2.0 (card.action.trigger, im.message.receive_v1, ...): NO headers.
+  //     Body contains header.token (must equal LARK_VERIFICATION_TOKEN),
+  //     header.create_time (microseconds, for freshness), header.event_id
+  //     (for replay protection).
+  //
+  // Detect Schema 2.0 via `schema === '2.0'` or by presence of header.token,
+  // and verify with the appropriate scheme.
+  const isSchema2 =
+    parsed.schema === '2.0' ||
+    (typeof parsed.header === 'object' && parsed.header !== null && 'token' in (parsed.header as Record<string, unknown>))
 
-  const timestamp = req.headers.get('x-lark-request-timestamp')
-  const nonce = req.headers.get('x-lark-request-nonce')
-  const signature = req.headers.get('x-lark-signature')
-
-  if (!timestamp || !nonce || !signature) {
-    return NextResponse.json({ error: 'Missing signature headers' }, { status: 401 })
-  }
-
-  // Timestamp freshness: rejects replay attempts older than ±5 min.
-  const tsSec = parseInt(timestamp, 10)
-  const nowSec = Math.floor(Date.now() / 1000)
-  if (!Number.isFinite(tsSec) || Math.abs(nowSec - tsSec) > TIMESTAMP_FRESHNESS_SEC) {
-    return NextResponse.json({ error: 'Stale or invalid timestamp' }, { status: 401 })
-  }
-
-  // Signature must match before we consider the body trusted.
-  if (!verifyLarkSignature(timestamp, nonce, bodyText, signature, appSecret)) {
-    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
-  }
-
-  // Nonce replay: even with a valid signature, reject duplicates within the freshness window.
   const nowMs = Date.now()
-  gcNonces(nowMs)
-  if (seenNonces.has(nonce)) {
-    return NextResponse.json({ error: 'Replay detected' }, { status: 401 })
+
+  if (isSchema2) {
+    const expectedToken = process.env.LARK_VERIFICATION_TOKEN
+    if (!expectedToken) {
+      return NextResponse.json({ error: 'Server not configured (LARK_VERIFICATION_TOKEN)' }, { status: 500 })
+    }
+
+    const header = asObject(parsed.header)
+    const receivedToken = getString(header, 'token') ?? ''
+    const eventId = getString(header, 'event_id') ?? ''
+    const createTimeRaw = getString(header, 'create_time') ?? ''
+
+    if (!receivedToken || receivedToken !== expectedToken) {
+      return NextResponse.json({ error: 'Invalid token' }, { status: 401 })
+    }
+
+    // create_time is microseconds → ms
+    const createTimeMs = Number(createTimeRaw) / 1000
+    if (!Number.isFinite(createTimeMs) || Math.abs(nowMs - createTimeMs) > TIMESTAMP_FRESHNESS_SEC * 1000) {
+      return NextResponse.json({ error: 'Stale or invalid create_time' }, { status: 401 })
+    }
+
+    // Replay protection via event_id (in-memory store, namespaced).
+    gcNonces(nowMs)
+    const replayKey = `evt:${eventId}`
+    if (eventId && seenNonces.has(replayKey)) {
+      return NextResponse.json({ error: 'Replay detected' }, { status: 401 })
+    }
+    if (eventId) seenNonces.set(replayKey, nowMs + NONCE_RETENTION_MS)
+  } else {
+    // Legacy header-signature path (Schema 1.0 / *_v1 callbacks)
+    const appSecret = process.env.LARK_APP_SECRET
+    if (!appSecret) {
+      return NextResponse.json({ error: 'Server not configured (LARK_APP_SECRET)' }, { status: 500 })
+    }
+
+    const timestamp = req.headers.get('x-lark-request-timestamp')
+    const nonce = req.headers.get('x-lark-request-nonce')
+    const signature = req.headers.get('x-lark-signature')
+
+    if (!timestamp || !nonce || !signature) {
+      return NextResponse.json({ error: 'Missing signature headers' }, { status: 401 })
+    }
+
+    const tsSec = parseInt(timestamp, 10)
+    const nowSec = Math.floor(nowMs / 1000)
+    if (!Number.isFinite(tsSec) || Math.abs(nowSec - tsSec) > TIMESTAMP_FRESHNESS_SEC) {
+      return NextResponse.json({ error: 'Stale or invalid timestamp' }, { status: 401 })
+    }
+
+    if (!verifyLarkSignature(timestamp, nonce, bodyText, signature, appSecret)) {
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
+    }
+
+    gcNonces(nowMs)
+    if (seenNonces.has(nonce)) {
+      return NextResponse.json({ error: 'Replay detected' }, { status: 401 })
+    }
+    seenNonces.set(nonce, nowMs + NONCE_RETENTION_MS)
   }
-  seenNonces.set(nonce, nowMs + NONCE_RETENTION_MS)
 
   // Past this point the request is signed, fresh, and not a replay — body is trusted.
   try {
