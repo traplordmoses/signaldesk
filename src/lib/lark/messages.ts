@@ -172,24 +172,20 @@ function threeColumnButtons(left: object, middle: object, right: object) {
 /**
  * Build the review card.
  *
- * Layout:
- *   - cluster headline + metadata (always visible)
- *   - tweet quote (always visible, read-only display)
- *   - Approve / Reject buttons (always visible, primary actions)
- *   - "Edit wording" collapsible panel (default collapsed) containing
- *     the textbox + Save edit button
+ * Layout (intentionally minimal):
+ *   - cluster headline + metadata
+ *   - tweet quote
+ *   - [Approve]  [Reject]
  *
- * The collapsible panel is a Schema 2.0 client-side toggle — expand /
- * collapse happens locally in the Lark client, no callback needed.
- * Crucially, all interactive elements (Approve, Reject, Save edit, the
- * input) are present in the card from send-time, so Lark's client binds
- * them as actionable. The previous "show_edit toggles a form into the
- * card via update" approach left dynamically-added buttons silently
- * unbound — they rendered but didn't fire callbacks.
+ * No inline-edit affordance — final wording tweaks happen in the X
+ * composer at the manual post step (which is the existing flow after
+ * Approve → DM with intent link → human clicks Post on X). That step
+ * is itself an edit surface, so duplicating it inside Lark added
+ * complexity for a case that's already covered downstream.
  *
- * The `editingPostId` parameter is retained for back-compat with old
- * code paths but is no longer used to switch render modes; all posts
- * render the same card shape regardless of its value.
+ * The `editingPostId` parameter is retained for the function signature
+ * back-compat with handler.ts callers but is now unused — all posts
+ * render the same minimal card shape.
  */
 export function buildReviewCard(
   cluster: EventCluster,
@@ -241,50 +237,12 @@ export function buildReviewCard(
     const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
 
-    // Primary actions: Approve / Reject. Both bound at send-time so
-    // clicks always fire reliably.
+    // Two actions, side by side. The X composer at the manual post step
+    // is the edit surface for any wording tweaks.
     elements.push(twoColumnButtons(
       callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
       callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
     ))
-
-    // Edit affordance: a Schema 2.0 collapsible_panel. Default collapsed,
-    // so the card visually leads with the read-only quote + primary
-    // actions. Reviewer clicks the panel header to expand and reveal the
-    // textbox + Save edit button. The form lives inside the original
-    // card structure, so the Save button is bound to fire callbacks
-    // reliably (unlike dynamically-added buttons via card update).
-    elements.push({
-      tag: 'collapsible_panel',
-      expanded: false,
-      header: {
-        title: md('✏️ **Edit wording** _(optional — click to expand)_'),
-      },
-      elements: [
-        {
-          tag: 'form',
-          name: `edit_form_${post.id}`,
-          elements: [
-            {
-              tag: 'input',
-              // Lark requires globally-unique input names across the whole card.
-              name: `edited_content_${post.id}`,
-              input_type: 'multiline_text',
-              rows: 3,
-              default_value: displayContent,
-              placeholder: plainText('Edited tweet text — then click Save edit'),
-            },
-            callbackButton({
-              text: '💾 Save edit',
-              type: 'primary',
-              action: 'save_edit',
-              postId: post.id,
-              formSubmit: true,
-            }),
-          ],
-        },
-      ],
-    })
   }
 
   // Pause bot at the bottom
