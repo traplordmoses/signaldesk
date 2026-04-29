@@ -136,7 +136,12 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
 
     const { items } = result.value
     const weight = source.weight ?? 5
-    const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000
+    // Dedup window for title-hash bumped from 4h → 24h. RSS feeds often re-publish
+    // the same article hours later with a slightly mutated URL (rotating tracking
+    // params, AMP variants my normalizer doesn't catch, etc.). 4h was too narrow
+    // — the same Trump-approval story re-clustered every 4-5h and produced a fresh
+    // event_cluster, which the cron then re-sent to Lark.
+    const titleDedupCutoff = Date.now() - 24 * 60 * 60 * 1000
 
     for (const item of items) {
       try {
@@ -147,13 +152,13 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
           .get()
         if (existing) continue
 
-        // Check title_hash near-dedup (last 4 hours)
+        // Check title_hash near-dedup (last 24 hours)
         const recentTitle = db.select({ id: newsItems.id })
           .from(newsItems)
           .where(
             and(
               eq(newsItems.titleHash, item.titleHash),
-              gt(newsItems.ingestedAt, fourHoursAgo)
+              gt(newsItems.ingestedAt, titleDedupCutoff)
             )
           )
           .get()

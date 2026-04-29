@@ -1,7 +1,7 @@
 import cron from 'node-cron'
 import { db, sqlite } from '@/lib/db'
 import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
-import { eq, and, gt } from 'drizzle-orm'
+import { eq, and, gt, isNull } from 'drizzle-orm'
 
 let started = false
 
@@ -107,19 +107,32 @@ async function runAutoGenerate() {
         ) {
           try {
             const { sendClusterToLark } = await import('@/lib/lark/messages')
-            const freshPosts = db.select()
+            // Only send posts that have NEVER been delivered to Lark. Without this
+            // filter, any cluster that gets re-selected (status reverted, re-clustered,
+            // generation failed previously, etc.) re-sends every post it ever produced
+            // — that's how the Trump-approval card shipped 12 times in 5 hours.
+            const unsent = db.select()
               .from(generatedPosts)
-              .where(eq(generatedPosts.clusterId, cluster.id))
+              .where(and(
+                eq(generatedPosts.clusterId, cluster.id),
+                isNull(generatedPosts.larkSentAt),
+              ))
               .all()
-            const messageId = await sendClusterToLark(cluster, freshPosts)
-            if (messageId) {
-              for (const p of freshPosts) {
-                db.update(generatedPosts)
-                  .set({ larkMessageId: messageId, larkSentAt: Date.now() })
-                  .where(eq(generatedPosts.id, p.id))
-                  .run()
+            if (unsent.length === 0) {
+              console.log(`[cron] no unsent posts for cluster ${cluster.id} — skipping send`)
+            } else {
+              const messageId = await sendClusterToLark(cluster, unsent)
+              if (messageId) {
+                for (const p of unsent) {
+                  db.update(generatedPosts)
+                    .set({ larkMessageId: messageId, larkSentAt: Date.now() })
+                    .where(eq(generatedPosts.id, p.id))
+                    .run()
+                }
+                console.log(`[cron] sent ${unsent.length} post(s) to Lark: ${cluster.canonicalHeadline.slice(0, 50)}`)
+              } else {
+                console.error(`[cron] Lark send returned no messageId for cluster ${cluster.id} — posts left unsent for retry`)
               }
-              console.log(`[cron] sent to Lark: ${cluster.canonicalHeadline.slice(0, 50)}`)
             }
           } catch (larkErr) {
             console.error('[cron] Lark send failed:', larkErr)

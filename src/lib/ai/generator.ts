@@ -331,9 +331,20 @@ export async function generateSmartPosts(cluster: Cluster) {
     }
   }
 
-  // Legacy: also export generateAllModes for manual generation from UI (generates up to 2)
+  // Status update — critical for preventing re-pick by the cron candidate query.
+  //   posts.length > 0  → 'done'              (success path)
+  //   posts.length == 0 → 'generation_failed' (every generatePost threw — usually
+  //                       fabricated-% or banned-phrase rejection; previously we
+  //                       left status='new' which made the cluster re-qualify
+  //                       every 15-min tick forever)
+  // Manual retry is still possible by hitting POST /api/posts/generate with
+  // the cluster_id explicitly.
   db.update(eventClusters)
-    .set({ postCount: posts.length, status: posts.length > 0 ? 'done' : 'new', lastUpdatedAt: Date.now() })
+    .set({
+      postCount: posts.length,
+      status: posts.length > 0 ? 'done' : 'generation_failed',
+      lastUpdatedAt: Date.now(),
+    })
     .where(eq(eventClusters.id, cluster.id))
     .run()
 

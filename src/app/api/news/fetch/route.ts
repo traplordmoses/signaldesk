@@ -5,7 +5,7 @@ import { clusterNewItems } from '@/lib/news/clusterer'
 import { generateSmartPosts } from '@/lib/ai/generator'
 import { db } from '@/lib/db'
 import { eventClusters, settings } from '@/lib/db/schema'
-import { eq, and, gt } from 'drizzle-orm'
+import { eq, and, gt, isNull } from 'drizzle-orm'
 
 export async function POST() {
   try {
@@ -41,16 +41,27 @@ export async function POST() {
             const { sendClusterToLark } = await import('@/lib/lark/messages')
             const { db: dbImport } = await import('@/lib/db')
             const { generatedPosts } = await import('@/lib/db/schema')
-            const { eq: eqImport } = await import('drizzle-orm')
-            const freshPosts = dbImport.select().from(generatedPosts)
-              .where(eqImport(generatedPosts.clusterId, cluster.id)).all()
-            const messageId = await sendClusterToLark(cluster, freshPosts)
-            if (messageId) {
-              for (const p of freshPosts) {
-                dbImport.update(generatedPosts)
-                  .set({ larkMessageId: messageId, larkSentAt: Date.now() })
-                  .where(eqImport(generatedPosts.id, p.id))
-                  .run()
+            // Only send posts that have NEVER been delivered to Lark — see scheduler.ts for full rationale.
+            const unsent = dbImport.select().from(generatedPosts)
+              .where(and(
+                eq(generatedPosts.clusterId, cluster.id),
+                isNull(generatedPosts.larkSentAt),
+              ))
+              .all()
+            if (unsent.length === 0) {
+              console.log(`[fetch route] no unsent posts for cluster ${cluster.id} — skipping send`)
+            } else {
+              const messageId = await sendClusterToLark(cluster, unsent)
+              if (messageId) {
+                for (const p of unsent) {
+                  dbImport.update(generatedPosts)
+                    .set({ larkMessageId: messageId, larkSentAt: Date.now() })
+                    .where(eq(generatedPosts.id, p.id))
+                    .run()
+                }
+                console.log(`[fetch route] sent ${unsent.length} post(s) to Lark`)
+              } else {
+                console.error(`[fetch route] Lark send returned no messageId for cluster ${cluster.id}`)
               }
             }
           } catch (larkErr) {
