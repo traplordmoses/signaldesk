@@ -176,13 +176,57 @@ async function runAutoGenerate() {
   }
 }
 
+// Tracks the registered cron tasks so the shutdown handler can stop them
+// before closing the DB. Without this, an in-flight cron task could try to
+// write to a closed sqlite handle.
+const scheduledTasks: ReturnType<typeof cron.schedule>[] = []
+
+let shutdownRegistered = false
+
+function registerGracefulShutdown() {
+  if (shutdownRegistered) return
+  shutdownRegistered = true
+
+  let shuttingDown = false
+  const handle = (signal: NodeJS.Signals) => {
+    if (shuttingDown) return  // ignore repeat signals during shutdown
+    shuttingDown = true
+
+    console.log(`[shutdown] received ${signal}, stopping cron + checkpointing DB`)
+
+    // Stop scheduled cron tasks. Already-running task bodies finish naturally;
+    // the per-task `running` overlap guards prevent new ticks from stacking.
+    for (const task of scheduledTasks) {
+      try { task.stop() } catch (e) { console.error('[shutdown] task.stop failed:', e) }
+    }
+
+    // Checkpoint WAL into the main DB file then close. Without this, recent
+    // writes sit in the -wal sidecar; a deploy that copies only the main file
+    // (and a SIGKILL after a stuck SIGTERM) loses those writes.
+    try {
+      sqlite.pragma('wal_checkpoint(TRUNCATE)')
+      sqlite.close()
+      console.log('[shutdown] DB checkpointed and closed')
+    } catch (e) {
+      console.error('[shutdown] DB close failed:', e)
+    }
+
+    process.exit(0)
+  }
+
+  process.on('SIGTERM', handle)
+  process.on('SIGINT', handle)
+}
+
 export function startScheduler() {
   if (started) return
   started = true
 
-  cron.schedule('*/5 * * * *', runFetch)
-  cron.schedule('*/15 * * * *', runAutoGenerate)
-  cron.schedule('0 3 * * *', runPrune)  // daily 03:00 — prune audit_log & old processed items
+  scheduledTasks.push(cron.schedule('*/5 * * * *', runFetch))
+  scheduledTasks.push(cron.schedule('*/15 * * * *', runAutoGenerate))
+  scheduledTasks.push(cron.schedule('0 3 * * *', runPrune))  // daily 03:00 — prune audit_log & old processed items
+
+  registerGracefulShutdown()
 
   console.log('[cron] scheduler started — fetch every 5min, generate every 15min, prune daily 03:00')
 }
