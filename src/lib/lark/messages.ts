@@ -206,7 +206,11 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
       elements: [
         {
           tag: 'input',
-          name: 'edited_content',
+          // Lark requires globally-unique input names across the entire card.
+          // Multi-post clusters (BREAKING + JUST IN) put multiple forms on one
+          // card, so scope the input name by post id. The route handler reads
+          // it back via the same post-scoped key (see callback/route.ts).
+          name: `edited_content_${post.id}`,
           input_type: 'multiline_text',
           rows: 4,
           default_value: displayContent,

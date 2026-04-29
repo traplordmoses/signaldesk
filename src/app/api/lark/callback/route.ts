@@ -99,7 +99,15 @@ function normalizeCardActionCallback(parsed: LarkCallbackObject): {
   const userIdObj = asObject(operatorObj?.user_id)
 
   const actionValue = parseActionValue(actionObj?.value)
-  const editedContent = actionValue.editedContent ?? extractFormString(actionObj, event, 'edited_content')
+  // Card form inputs are scoped by post id (see messages.ts) to avoid
+  // duplicate-name errors from Lark on multi-post cards. Try the scoped key
+  // first, then fall back to the legacy unscoped key for any in-flight
+  // callbacks from older cards.
+  const scopedFormKey = actionValue.postId ? `edited_content_${actionValue.postId}` : undefined
+  const editedContent =
+    actionValue.editedContent ??
+    (scopedFormKey ? extractFormString(actionObj, event, scopedFormKey) : undefined) ??
+    extractFormString(actionObj, event, 'edited_content')
 
   return {
     action: actionValue.action,

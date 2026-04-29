@@ -201,6 +201,35 @@ describe('POST /api/lark/callback — signature verification', () => {
     })
   })
 
+  it('resolves post-scoped form input names (multi-post card edit)', async () => {
+    // Cards with multiple posts use input names like `edited_content_<postId>`
+    // because Lark requires globally unique input names across the whole card.
+    // The route should look up the value by the post id from action.value.
+    const bodyText = schema2Body({
+      eventType: 'card.action.trigger',
+      event: {
+        action: {
+          value: { action: 'save_edit', postId: 'pmulti' },
+          form_value: {
+            edited_content_pother: 'Other draft (should be ignored)',
+            edited_content_pmulti: 'Edit for the clicked post.',
+          },
+        },
+        operator: { user_id: { open_id: 'ou-multi-editor' }, user_name: 'Editor' },
+        context: { open_message_id: 'om-multi-edit' },
+      },
+    })
+
+    const res = await POST(makeRequest(bodyText) as any)
+
+    expect(res.status).toBe(200)
+    expect(handleLarkCallback).toHaveBeenCalledWith({
+      action: { value: { action: 'save_edit', postId: 'pmulti', editedContent: 'Edit for the clicked post.' } },
+      operator: { open_id: 'ou-multi-editor', name: 'Editor' },
+      context: { open_message_id: 'om-multi-edit' },
+    })
+  })
+
   it('no-ops on im.message.receive_v1 (Schema 2.0 inline edit removed the DM-receive path)', async () => {
     const bodyText = schema2Body({
       eventType: 'im.message.receive_v1',
