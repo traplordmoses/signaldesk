@@ -1,4 +1,4 @@
-import { db, sqlite } from '@/lib/db'
+import { db } from '@/lib/db'
 import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/schema'
 import { eq } from 'drizzle-orm'
 import {
@@ -6,14 +6,11 @@ import {
   updateGroupCardEdited,
   sendApprovalDM,
   sendApprovalThreadReply,
-  sendEditDM,
-  sendSavedEditDM,
-  updateEditDM,
   sendBotStatusToGroup,
 } from './messages'
 
 interface ActionValue {
-  action: 'approve' | 'reject' | 'edit' | 'save_edit' | 'pause_bot' | 'resume_bot'
+  action: 'approve' | 'reject' | 'save_edit' | 'pause_bot' | 'resume_bot'
   postId?: string
   editedContent?: string
 }
@@ -40,7 +37,7 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   const actorName = operator.name ?? operator.open_id
   const messageId = context.open_message_id
 
-  // Handle pause/resume — no postId needed
+  // Pause / resume don't need a postId
   if (actionType === 'pause_bot' || actionType === 'resume_bot') {
     const paused = actionType === 'pause_bot'
     db.update(settings)
@@ -74,8 +71,6 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
 
       await updateGroupCard(messageId, cluster, post, actorName, true)
 
-      // Try DM first. Fall back to threaded group reply if the reviewer has
-      // never opened a chat with the bot (Lark returns code 230020 etc).
       try {
         await sendApprovalDM(operator.open_id, post)
         landedIn = 'dm'
@@ -161,57 +156,20 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
     return { code: 0, toast: { type: 'info', content: 'Post rejected.' } }
   }
 
-  if (actionType === 'edit') {
-    // The edit flow REQUIRES a private DM channel because the user replies with
-    // the edited draft as a text message that handleLarkMessage matches back to
-    // the most recent edit_requested audit row. A threaded reply doesn't provide
-    // that round-trip, so if the DM fails we tell the user how to unblock
-    // themselves rather than silently dropping the request.
-    let dmFailed = false
-    try {
-      await sendEditDM(operator.open_id, post)
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'edit_requested',
-        entityType: 'generated_post',
-        entityId: postId,
-        actor: operator.open_id,
-        details: JSON.stringify({ clusterId: cluster.id }),
-        createdAt: Date.now(),
-      }).run()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      dmFailed = true
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'error',
-        entityType: 'generated_post',
-        entityId: postId,
-        errorCode: 'EDIT_DM_FAILED',
-        errorMessage: msg,
-        createdAt: Date.now(),
-      }).run()
-    }
-
-    return {
-      code: 0,
-      toast: {
-        type: dmFailed ? 'warning' : 'info',
-        content: dmFailed
-          ? 'Edit unavailable — open a DM with this bot first (send any message), then click Edit again.'
-          : 'Check your DMs, then reply with the edited draft.',
-      },
-    }
-  }
-
+  // save_edit — submitted by the inline form on the review card. The route's
+  // extractFormString pulls form_value.edited_content into action.value.editedContent
+  // before this handler runs, so all we do here is validate, persist, and patch
+  // the visible card.
   if (actionType === 'save_edit') {
     const editedContent = action.value.editedContent?.trim()
     if (!editedContent) {
       return { code: 1, toast: { type: 'error', content: 'Edited text cannot be empty.' } }
     }
-
     if (editedContent.length > 280) {
       return { code: 1, toast: { type: 'error', content: `Edited text is ${editedContent.length}/280 characters.` } }
+    }
+    if (editedContent === post.content) {
+      return { code: 0, toast: { type: 'info', content: 'No changes to save.' } }
     }
 
     try {
@@ -226,11 +184,8 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         .run()
 
       const updatedPost = db.select().from(generatedPosts).where(eq(generatedPosts.id, postId)).get()
-      if (updatedPost) {
-        await updateEditDM(messageId, updatedPost)
-        if (updatedPost.larkMessageId) {
-          await updateGroupCardEdited(updatedPost.larkMessageId, cluster, updatedPost, actorName)
-        }
+      if (updatedPost && updatedPost.larkMessageId) {
+        await updateGroupCardEdited(updatedPost.larkMessageId, cluster, updatedPost, actorName)
       }
 
       db.insert(auditLog).values({
@@ -253,95 +208,11 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         errorMessage: msg,
         createdAt: Date.now(),
       }).run()
-
       return { code: 1, toast: { type: 'error', content: 'Could not save edit.' } }
     }
 
     return { code: 0, toast: { type: 'success', content: 'Draft updated.' } }
   }
-
-  return { code: 0 }
-}
-
-export async function handleLarkMessage(payload: {
-  openId: string
-  actorName?: string
-  text: string
-}): Promise<{ code: number }> {
-  const editedContent = payload.text.trim()
-  if (!editedContent) return { code: 0 }
-
-  const latestRequest = sqlite.prepare(`
-    SELECT entity_id AS postId, created_at AS createdAt
-    FROM audit_log
-    WHERE event_type = 'edit_requested'
-      AND actor = ?
-    ORDER BY created_at DESC
-    LIMIT 1
-  `).get(payload.openId) as { postId: string; createdAt: number } | undefined
-
-  if (!latestRequest) return { code: 0 }
-
-  const latestCompletion = sqlite.prepare(`
-    SELECT created_at AS createdAt
-    FROM audit_log
-    WHERE event_type IN ('post_edited', 'edit_cancelled')
-      AND actor = ?
-    ORDER BY created_at DESC
-    LIMIT 1
-  `).get(payload.openId) as { createdAt: number } | undefined
-
-  if (latestCompletion && latestCompletion.createdAt > latestRequest.createdAt) {
-    return { code: 0 }
-  }
-
-  const ageMs = Date.now() - latestRequest.createdAt
-  if (ageMs > 30 * 60 * 1000) return { code: 0 }
-
-  if (editedContent.length > 280) {
-    console.warn('lark message edit ignored: over 280 chars', {
-      openId: payload.openId,
-      postId: latestRequest.postId,
-      charCount: editedContent.length,
-    })
-    return { code: 0 }
-  }
-
-  const post = db.select().from(generatedPosts).where(eq(generatedPosts.id, latestRequest.postId)).get()
-  if (!post) return { code: 0 }
-
-  const cluster = db.select().from(eventClusters).where(eq(eventClusters.id, post.clusterId)).get()
-  if (!cluster) return { code: 0 }
-
-  const actorName = payload.actorName ?? payload.openId
-
-  db.update(generatedPosts)
-    .set({
-      content: editedContent,
-      charCount: editedContent.length,
-      reviewedBy: actorName,
-      updatedAt: Date.now(),
-    })
-    .where(eq(generatedPosts.id, latestRequest.postId))
-    .run()
-
-  const updatedPost = db.select().from(generatedPosts).where(eq(generatedPosts.id, latestRequest.postId)).get()
-  if (!updatedPost) return { code: 0 }
-
-  if (updatedPost.larkMessageId) {
-    await updateGroupCardEdited(updatedPost.larkMessageId, cluster, updatedPost, actorName)
-  }
-  await sendSavedEditDM(payload.openId, updatedPost)
-
-  db.insert(auditLog).values({
-    id: crypto.randomUUID(),
-    eventType: 'post_edited',
-    entityType: 'generated_post',
-    entityId: latestRequest.postId,
-    actor: payload.openId,
-    details: JSON.stringify({ clusterId: cluster.id, charCount: editedContent.length }),
-    createdAt: Date.now(),
-  }).run()
 
   return { code: 0 }
 }

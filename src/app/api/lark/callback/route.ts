@@ -1,7 +1,7 @@
 export const dynamic = 'force-dynamic'
 import { NextRequest, NextResponse } from 'next/server'
 import { createHash } from 'crypto'
-import { handleLarkCallback, handleLarkMessage } from '@/lib/lark/handler'
+import { handleLarkCallback } from '@/lib/lark/handler'
 
 const TIMESTAMP_FRESHNESS_SEC = 5 * 60       // accept timestamps within ±5 min
 const NONCE_RETENTION_MS = 6 * 60 * 1000     // remember nonces for 6 min (5 min window + buffer)
@@ -103,34 +103,6 @@ function normalizeCardActionCallback(parsed: LarkCallbackObject): {
   }
 }
 
-function parseLarkTextMessageContent(content: unknown): string | undefined {
-  if (typeof content !== 'string') return undefined
-  try {
-    const parsedContent = JSON.parse(content) as Record<string, unknown>
-    const text = parsedContent.text
-    return typeof text === 'string' ? text : undefined
-  } catch {
-    return undefined
-  }
-}
-
-function normalizeMessageReceiveCallback(parsed: LarkCallbackObject): {
-  openId?: string
-  actorName?: string
-  text?: string
-} {
-  const event = asObject(parsed.event)
-  const sender = asObject(event?.sender)
-  const senderId = asObject(sender?.sender_id)
-  const message = asObject(event?.message)
-
-  return {
-    openId: getString(senderId, 'open_id'),
-    actorName: getString(sender, 'sender_type') === 'user' ? getString(senderId, 'open_id') : undefined,
-    text: parseLarkTextMessageContent(message?.content),
-  }
-}
-
 function gcNonces(now: number) {
   for (const [k, expiry] of seenNonces.entries()) {
     if (expiry < now) seenNonces.delete(k)
@@ -210,15 +182,11 @@ export async function POST(req: NextRequest) {
   try {
     const eventType = getString(asObject(parsed.header), 'event_type') ?? getString(parsed, 'type')
 
+    // We no longer subscribe to im.message.receive_v1 — Schema 2.0 cards put the
+    // edit field inline in the group chat, so we don't need to listen for DMs.
+    // If Lark still pushes one (subscription leftover), no-op.
     if (eventType === 'im.message.receive_v1') {
-      const message = normalizeMessageReceiveCallback(parsed)
-      if (!message.openId || !message.text) return NextResponse.json({ code: 0 })
-      const result = await handleLarkMessage({
-        openId: message.openId,
-        actorName: message.actorName,
-        text: message.text,
-      })
-      return NextResponse.json(result)
+      return NextResponse.json({ code: 0 })
     }
 
     const normalized = normalizeCardActionCallback(parsed)
@@ -240,11 +208,11 @@ export async function POST(req: NextRequest) {
     })
 
     const callbackValue: {
-      action: 'approve' | 'reject' | 'edit' | 'save_edit' | 'pause_bot' | 'resume_bot'
+      action: 'approve' | 'reject' | 'save_edit' | 'pause_bot' | 'resume_bot'
       postId?: string
       editedContent?: string
     } = {
-      action: normalized.action as 'approve' | 'reject' | 'edit' | 'save_edit' | 'pause_bot' | 'resume_bot',
+      action: normalized.action as 'approve' | 'reject' | 'save_edit' | 'pause_bot' | 'resume_bot',
       postId: normalized.postId,
     }
     if (normalized.editedContent !== undefined) callbackValue.editedContent = normalized.editedContent

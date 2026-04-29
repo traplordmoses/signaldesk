@@ -4,6 +4,11 @@ import { newsItems } from '@/lib/db/schema'
 import { inArray } from 'drizzle-orm'
 import type { EventCluster, GeneratedPost } from '@/types'
 
+// Lark Card Schema 2.0 — review cards use inline editable input so reviewers
+// can edit a draft directly in the group chat instead of via DM round-trip.
+// Schema 2.0 button clicks deliver to the Event Subscription URL (the
+// "card.action.trigger" callback subscription, not the legacy v1).
+
 const MODE_BADGES: Record<string, string> = {
   pure_news:  '⚡ Breaking',
   news_odds:  '📊 News + Odds',
@@ -90,7 +95,63 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
   }
 }
 
-// Uses Lark Card Schema 1.0 — elements at root level, supports "action" tag with buttons
+// ====================== Schema 2.0 helpers ======================
+
+function md(content: string) {
+  return { tag: 'markdown', content }
+}
+
+function plainText(content: string) {
+  return { tag: 'plain_text', content }
+}
+
+function callbackButton(opts: {
+  text: string
+  type?: 'primary' | 'default' | 'danger'
+  action: string
+  postId?: string
+  formSubmit?: boolean
+}) {
+  const value: Record<string, string> = { action: opts.action }
+  if (opts.postId) value.postId = opts.postId
+  const button: Record<string, unknown> = {
+    tag: 'button',
+    text: plainText(opts.text),
+    type: opts.type ?? 'default',
+    behaviors: [{ type: 'callback', value }],
+  }
+  if (opts.formSubmit) button.form_action_type = 'submit'
+  return button
+}
+
+function urlButton(opts: { text: string; url: string; type?: 'primary' | 'default' }) {
+  return {
+    tag: 'button',
+    text: plainText(opts.text),
+    type: opts.type ?? 'primary',
+    behaviors: [{
+      type: 'open_url',
+      default_url: opts.url,
+      pc_url: opts.url,
+      ios_url: opts.url,
+      android_url: opts.url,
+    }],
+  }
+}
+
+function twoColumnButtons(left: object, right: object) {
+  return {
+    tag: 'column_set',
+    flex_mode: 'none',
+    columns: [
+      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
+      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
+    ],
+  }
+}
+
+// ====================== Cards ======================
+
 function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object {
   const elements: object[] = []
 
@@ -103,319 +164,181 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
   try { topics = JSON.parse(cluster.topics ?? '[]') } catch { topics = [] }
 
   // Headline
-  elements.push({
-    tag: 'div',
-    text: { tag: 'lark_md', content: `**${cluster.canonicalHeadline}**` },
-  })
+  elements.push(md(`**${cluster.canonicalHeadline}**`))
 
   // Time + sources row
   const sourceLine = sourceNames.length > 0 ? sourceNames.join(' · ') : 'Unknown source'
-  elements.push({
-    tag: 'div',
-    text: {
-      tag: 'lark_md',
-      content: `🕐 **${timeAgo}** (${absTime})  ·  📰 ${sourceLine}`,
-    },
-  })
+  elements.push(md(`🕐 **${timeAgo}** (${absTime})  ·  📰 ${sourceLine}`))
 
   // Category + topic tags row
   const allTags = [categoryLabel, ...topics.map(englishTag)]
-  elements.push({
-    tag: 'div',
-    text: {
-      tag: 'lark_md',
-      content: allTags.join('  ·  ') + `  ·  Sources: ${cluster.sourceCount ?? 1}  ·  Score: **${(cluster.relevanceScore ?? 0).toFixed(1)}**/10`,
-    },
-  })
+  elements.push(md(allTags.join('  ·  ') + `  ·  Sources: ${cluster.sourceCount ?? 1}  ·  Score: **${(cluster.relevanceScore ?? 0).toFixed(1)}**/10`))
 
+  // Risk warning
   if (cluster.riskLevel === 'high') {
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: '⚠️ **HIGH RISK** — Review carefully before approving' },
-    })
+    elements.push(md('⚠️ **HIGH RISK** — Review carefully before approving'))
   } else if (cluster.riskLevel === 'medium') {
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: '⚠️ Medium risk — double check before approving' },
-    })
+    elements.push(md('⚠️ Medium risk — double check before approving'))
   }
 
   for (const post of posts) {
     const badge = MODE_BADGES[post.contentMode] ?? post.contentMode
     const isPureNews = post.contentMode === 'pure_news'
-    // Strip any URLs that might have slipped through in pure_news
     const displayContent = isPureNews
       ? post.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
       : post.content
 
     elements.push({ tag: 'hr' })
+    elements.push(md(`**${badge}** ${isPureNews ? '_(no link — tweet only)_' : ''}  ·  Score: ${post.estimatedScore ?? 'N/A'}/10`))
+
+    // Quote display (current saved content)
+    const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
+    elements.push(md(quoted))
+    elements.push(md(`_${displayContent.length}/280 chars_`))
+
+    // Inline edit form: input + Save button. Editing here and clicking Save
+    // submits `form_value.edited_content` along with the action callback,
+    // which the route's `extractFormString` picks up and forwards to handler
+    // as `editedContent`. handler.ts:save_edit applies it to the DB.
     elements.push({
-      tag: 'div',
-      text: {
-        tag: 'lark_md',
-        content: `**${badge}** ${isPureNews ? '_(no link — tweet only)_' : ''}  ·  Score: ${post.estimatedScore ?? 'N/A'}/10`,
-      },
-    })
-    // Tweet content — using > blockquote instead of ``` code block
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: displayContent.split('\n').map(l => `> ${l}`).join('\n') },
-    })
-    elements.push({
-      tag: 'div',
-      text: { tag: 'lark_md', content: `_${displayContent.length}/280 chars_` },
-    })
-    elements.push({
-      tag: 'action',
-      actions: [
+      tag: 'form',
+      name: `edit_form_${post.id}`,
+      elements: [
         {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '✅ Approve & Copy' },
-          type: 'primary',
-          value: { action: 'approve', postId: post.id },
+          tag: 'input',
+          name: 'edited_content',
+          input_type: 'multiline_text',
+          rows: 4,
+          default_value: displayContent,
+          placeholder: plainText('Type to edit, then press 💾 Save edit'),
         },
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '✏️ Edit' },
+        callbackButton({
+          text: '💾 Save edit',
           type: 'default',
-          value: { action: 'edit', postId: post.id },
-        },
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '❌ Reject' },
-          type: 'danger',
-          value: { action: 'reject', postId: post.id },
-        },
+          action: 'save_edit',
+          postId: post.id,
+          formSubmit: true,
+        }),
       ],
     })
+
+    // Approve / Reject row — outside the form so they don't trigger Save logic.
+    elements.push(twoColumnButtons(
+      callbackButton({ text: '✅ Approve & Copy', type: 'primary', action: 'approve', postId: post.id }),
+      callbackButton({ text: '❌ Reject',          type: 'danger',  action: 'reject',  postId: post.id }),
+    ))
   }
 
-  // Pause bot control at the bottom of every card
+  // Pause bot at the bottom
   elements.push({ tag: 'hr' })
-  elements.push({
-    tag: 'action',
-    actions: [
-      {
-        tag: 'button',
-        text: { tag: 'plain_text', content: '⏸ Pause Bot' },
-        type: 'default',
-        value: { action: 'pause_bot' },
-      },
-    ],
-  })
+  elements.push(callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' }))
 
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '📰 New posts ready for review' },
+      title: plainText('📰 New posts ready for review'),
       template: headerTemplate(cluster.riskLevel ?? 'low'),
     },
-    elements,
+    body: { elements },
   }
 }
 
 export function buildBotStatusCard(paused: boolean): object {
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: paused ? '⏸ Bot Paused' : '▶️ Bot Resumed' },
+      title: plainText(paused ? '⏸ Bot Paused' : '▶️ Bot Resumed'),
       template: paused ? 'grey' : 'green',
     },
-    elements: [
-      {
-        tag: 'div',
-        text: {
-          tag: 'lark_md',
-          content: paused
-            ? 'SignalDesk bot is now **paused**. No new posts will be sent to this group until you resume.'
-            : 'SignalDesk bot is now **active**. New high-scoring posts will be sent here automatically.',
-        },
-      },
-      {
-        tag: 'action',
-        actions: [
-          paused
-            ? {
-                tag: 'button',
-                text: { tag: 'plain_text', content: '▶️ Resume Bot' },
-                type: 'primary',
-                value: { action: 'resume_bot' },
-              }
-            : {
-                tag: 'button',
-                text: { tag: 'plain_text', content: '⏸ Pause Bot' },
-                type: 'default',
-                value: { action: 'pause_bot' },
-              },
-        ],
-      },
-    ],
+    body: {
+      elements: [
+        md(paused
+          ? 'SignalDesk bot is now **paused**. No new posts will be sent to this group until you resume.'
+          : 'SignalDesk bot is now **active**. New high-scoring posts will be sent here automatically.'),
+        paused
+          ? callbackButton({ text: '▶️ Resume Bot', type: 'primary', action: 'resume_bot' })
+          : callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' }),
+      ],
+    },
   }
 }
 
-function buildApprovalDMCard(post: GeneratedPost): object {
+function buildApprovalCard(post: GeneratedPost): object {
   const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: '✅ Post approved — ready to publish' },
+      title: plainText('✅ Post approved — ready to publish'),
       template: 'green',
     },
-    elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: displayContent } },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '🐦 Open X to post' },
-            type: 'primary',
-            multi_url: {
-              url: intentUrl,
-              pc_url: intentUrl,
-              ios_url: intentUrl,
-              android_url: intentUrl,
-            },
-          },
-        ],
-      },
-    ],
+    body: {
+      elements: [
+        md(displayContent),
+        urlButton({ text: '🐦 Open X to post', url: intentUrl, type: 'primary' }),
+      ],
+    },
   }
 }
 
 function buildUpdatedCard(cluster: EventCluster, post: GeneratedPost, actorName: string, approved: boolean): object {
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: cluster.canonicalHeadline },
+      title: plainText(cluster.canonicalHeadline),
       template: approved ? 'green' : 'grey',
     },
-    elements: [
-      {
-        tag: 'div',
-        text: {
-          tag: 'lark_md',
-          content: approved
-            ? `✅ **Approved** by ${actorName}`
-            : `❌ **Rejected** by ${actorName}`,
-        },
-      },
-      { tag: 'div', text: { tag: 'lark_md', content: displayContent } },
-    ],
+    body: {
+      elements: [
+        md(approved ? `✅ **Approved** by ${actorName}` : `❌ **Rejected** by ${actorName}`),
+        md(displayContent),
+      ],
+    },
   }
 }
 
 function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorName: string): object {
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
   return {
+    schema: '2.0',
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: 'plain_text', content: cluster.canonicalHeadline },
+      title: plainText(cluster.canonicalHeadline),
       template: 'blue',
     },
-    elements: [
-      {
-        tag: 'div',
-        text: {
-          tag: 'lark_md',
-          content: `✏️ **Edited** by ${actorName}`,
-        },
-      },
-      { tag: 'div', text: { tag: 'lark_md', content: displayContent } },
-      { tag: 'div', text: { tag: 'lark_md', content: `_${post.content.length}/280 chars_` } },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '✅ Approve & Copy' },
-            type: 'primary',
-            value: { action: 'approve', postId: post.id },
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '✏️ Edit again' },
-            type: 'default',
-            value: { action: 'edit', postId: post.id },
-          },
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '❌ Reject' },
-            type: 'danger',
-            value: { action: 'reject', postId: post.id },
-          },
-        ],
-      },
-    ],
+    body: {
+      elements: [
+        md(`✏️ **Edited** by ${actorName}`),
+        md(displayContent),
+        md(`_${post.content.length}/280 chars_`),
+        // After edit, offer Approve / Reject again so the reviewer can publish or kill in one click.
+        twoColumnButtons(
+          callbackButton({ text: '✅ Approve & Copy', type: 'primary', action: 'approve', postId: post.id }),
+          callbackButton({ text: '❌ Reject',          type: 'danger',  action: 'reject',  postId: post.id }),
+        ),
+      ],
+    },
   }
 }
 
-function buildEditDMCard(post: GeneratedPost): object {
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: 'Edit this post' },
-      template: 'blue',
-    },
-    elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: '**Reply to this bot DM with the edited tweet text.**' } },
-      { tag: 'div', text: { tag: 'lark_md', content: 'Your next text reply to the bot will replace this draft in SignalDesk. Keep it under 280 characters.' } },
-      { tag: 'hr' },
-      { tag: 'div', text: { tag: 'lark_md', content: post.content.split('\n').map(l => `> ${l}`).join('\n') } },
-      { tag: 'div', text: { tag: 'lark_md', content: `Current length: **${post.content.length}/280** chars` } },
-    ],
-  }
-}
-
-function buildSavedEditDMCard(post: GeneratedPost): object {
-  const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    config: { wide_screen_mode: true },
-    header: {
-      title: { tag: 'plain_text', content: 'Draft updated' },
-      template: 'green',
-    },
-    elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: '✅ **Saved.** The draft is updated in SignalDesk.' } },
-      { tag: 'div', text: { tag: 'lark_md', content: displayContent } },
-      { tag: 'div', text: { tag: 'lark_md', content: `_${post.content.length}/280 chars_` } },
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'button',
-            text: { tag: 'plain_text', content: '🐦 Open X to post' },
-            type: 'primary',
-            multi_url: {
-              url: intentUrl,
-              pc_url: intentUrl,
-              ios_url: intentUrl,
-              android_url: intentUrl,
-            },
-          },
-        ],
-      },
-    ],
-  }
-}
+// ====================== Send / Update ======================
 
 export async function sendClusterToLark(cluster: EventCluster, posts: GeneratedPost[]): Promise<string | null> {
   const chatId = process.env.LARK_REVIEW_CHAT_ID
   if (!chatId) throw new Error('LARK_REVIEW_CHAT_ID not set')
 
   const card = buildReviewCard(cluster, posts)
-
   const result = await larkPost('/im/v1/messages?receive_id_type=chat_id', {
     receive_id: chatId,
     msg_type: 'interactive',
     content: JSON.stringify(card),
-  }) as { code: number; msg: string; data?: { message_id?: string } }
-
-  if (result.code !== 0) throw new Error(`Lark send failed: ${result.msg}`)
-  return (result.data as { message_id?: string })?.message_id ?? null
+  })
+  return (result.data as { message_id?: string } | undefined)?.message_id ?? null
 }
 
 export async function updateGroupCard(
@@ -423,7 +346,7 @@ export async function updateGroupCard(
   cluster: EventCluster,
   post: GeneratedPost,
   actorName: string,
-  approved: boolean
+  approved: boolean,
 ): Promise<void> {
   const card = buildUpdatedCard(cluster, post, actorName, approved)
   await larkPatch(`/im/v1/messages/${messageId}`, {
@@ -436,7 +359,7 @@ export async function updateGroupCardEdited(
   messageId: string,
   cluster: EventCluster,
   post: GeneratedPost,
-  actorName: string
+  actorName: string,
 ): Promise<void> {
   const card = buildEditedGroupCard(cluster, post, actorName)
   await larkPatch(`/im/v1/messages/${messageId}`, {
@@ -446,7 +369,7 @@ export async function updateGroupCardEdited(
 }
 
 export async function sendApprovalDM(openId: string, post: GeneratedPost): Promise<void> {
-  const card = buildApprovalDMCard(post)
+  const card = buildApprovalCard(post)
   await larkPost('/im/v1/messages?receive_id_type=open_id', {
     receive_id: openId,
     msg_type: 'interactive',
@@ -459,7 +382,7 @@ export async function sendApprovalDM(openId: string, post: GeneratedPost): Promi
 // approval card as a threaded reply on the original review card so the action
 // stays visible right next to the cluster the reviewer just approved.
 export async function sendApprovalThreadReply(parentMessageId: string, post: GeneratedPost): Promise<void> {
-  const card = buildApprovalDMCard(post)
+  const card = buildApprovalCard(post)
   await larkPost(`/im/v1/messages/${parentMessageId}/reply`, {
     msg_type: 'interactive',
     content: JSON.stringify(card),
@@ -472,33 +395,6 @@ export async function sendBotStatusToGroup(paused: boolean): Promise<void> {
   const card = buildBotStatusCard(paused)
   await larkPost('/im/v1/messages?receive_id_type=chat_id', {
     receive_id: chatId,
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-export async function sendEditDM(openId: string, post: GeneratedPost): Promise<void> {
-  const card = buildEditDMCard(post)
-  await larkPost('/im/v1/messages?receive_id_type=open_id', {
-    receive_id: openId,
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-export async function sendSavedEditDM(openId: string, post: GeneratedPost): Promise<void> {
-  const card = buildSavedEditDMCard(post)
-  await larkPost('/im/v1/messages?receive_id_type=open_id', {
-    receive_id: openId,
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-export async function updateEditDM(messageId: string, post: GeneratedPost): Promise<void> {
-  if (!messageId) return
-  const card = buildSavedEditDMCard(post)
-  await larkPatch(`/im/v1/messages/${messageId}`, {
     msg_type: 'interactive',
     content: JSON.stringify(card),
   })

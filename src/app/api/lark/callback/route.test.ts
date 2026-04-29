@@ -8,12 +8,10 @@ import { createHash } from 'crypto'
 
 vi.mock('@/lib/lark/handler', () => ({
   handleLarkCallback: vi.fn(async () => ({ code: 0, message: 'ok' })),
-  handleLarkMessage: vi.fn(async () => ({ code: 0 })),
 }))
 
 // Import AFTER the mock so the route's import resolves to the mocked handler.
 const { handleLarkCallback } = await import('@/lib/lark/handler')
-const { handleLarkMessage } = await import('@/lib/lark/handler')
 const { POST } = await import('./route')
 
 const SECRET = 'test-secret-do-not-use-in-prod'
@@ -143,30 +141,18 @@ describe('POST /api/lark/callback — signature verification', () => {
     })
   })
 
-  it('routes text DMs to the Lark message edit handler', async () => {
+  it('no-ops on im.message.receive_v1 (Schema 2.0 inline edit removed the DM-receive path)', async () => {
     const bodyText = JSON.stringify({
       schema: '2.0',
       header: { event_type: 'im.message.receive_v1' },
       event: {
-        sender: {
-          sender_type: 'user',
-          sender_id: { open_id: 'ou-editor' },
-        },
-        message: {
-          message_type: 'text',
-          content: JSON.stringify({ text: 'Edited directly in Lark.' }),
-        },
+        sender: { sender_type: 'user', sender_id: { open_id: 'ou-someone' } },
+        message: { message_type: 'text', content: JSON.stringify({ text: 'Hello bot.' }) },
       },
     })
-
     const res = await POST(makeRequest(bodyText, signedHeaders(bodyText)) as any)
-
     expect(res.status).toBe(200)
-    expect(handleLarkMessage).toHaveBeenCalledWith({
-      openId: 'ou-editor',
-      actorName: 'ou-editor',
-      text: 'Edited directly in Lark.',
-    })
+    expect(handleLarkCallback).not.toHaveBeenCalled()
   })
 
   it('rejects replays of an already-seen nonce', async () => {
