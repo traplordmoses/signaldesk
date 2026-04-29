@@ -28,8 +28,11 @@ interface CallbackPayload {
   }
 }
 
+// Lark Schema 2.0 callback response. The legacy v1 `code` field is omitted
+// from card-update responses — including it appears to make Lark's client
+// interpret the response as v1 legacy and silently drop the `card` update.
 export async function handleLarkCallback(payload: CallbackPayload): Promise<{
-  code: number
+  code?: number
   toast?: { type: string; content: string }
   card?: { type: 'raw'; data: object }
 }> {
@@ -77,10 +80,19 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
     const card = buildReviewCard(cluster, clusterPosts, {
       editingPostId: actionType === 'show_edit' ? postId : undefined,
     })
-    return {
-      code: 0,
-      card: { type: 'raw', data: card },
+    // Schema 2.0 inline card-update response shape — `{ toast, card }` per
+    // docs, no top-level `code`. Toast is informational; the actual update
+    // happens via card.type='raw'.
+    const response = {
+      toast: { type: 'info', content: actionType === 'show_edit' ? 'Editing…' : 'Edit cancelled' },
+      card: { type: 'raw' as const, data: card },
     }
+    console.log(`[lark callback] ${actionType} → returning inline card update`, {
+      postId,
+      cardKeys: Object.keys(card),
+      hasForm: actionType === 'show_edit',
+    })
+    return response
   }
 
   if (actionType === 'approve') {
@@ -225,7 +237,6 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         .all()
       const card = buildReviewCard(cluster, clusterPosts)
       return {
-        code: 0,
         toast: { type: 'success', content: 'Edit saved.' },
         card: { type: 'raw', data: card },
       }
