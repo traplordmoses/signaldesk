@@ -295,11 +295,11 @@ export async function POST(req: NextRequest) {
     })
 
     const callbackValue: {
-      action: 'approve' | 'reject' | 'save_edit' | 'pause_bot' | 'resume_bot'
+      action: 'approve' | 'reject' | 'save_edit' | 'show_edit' | 'cancel_edit' | 'pause_bot' | 'resume_bot'
       postId?: string
       editedContent?: string
     } = {
-      action: normalized.action as 'approve' | 'reject' | 'save_edit' | 'pause_bot' | 'resume_bot',
+      action: normalized.action as 'approve' | 'reject' | 'save_edit' | 'show_edit' | 'cancel_edit' | 'pause_bot' | 'resume_bot',
       postId: normalized.postId,
     }
     if (normalized.editedContent !== undefined) callbackValue.editedContent = normalized.editedContent

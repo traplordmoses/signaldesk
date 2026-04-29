@@ -4,13 +4,14 @@ import { eq } from 'drizzle-orm'
 import {
   updateGroupCard,
   updateGroupCardEdited,
+  updateReviewCardMode,
   sendApprovalDM,
   sendApprovalThreadReply,
   sendBotStatusToGroup,
 } from './messages'
 
 interface ActionValue {
-  action: 'approve' | 'reject' | 'save_edit' | 'pause_bot' | 'resume_bot'
+  action: 'approve' | 'reject' | 'save_edit' | 'show_edit' | 'cancel_edit' | 'pause_bot' | 'resume_bot'
   postId?: string
   editedContent?: string
 }
@@ -60,6 +61,30 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
 
   const cluster = db.select().from(eventClusters).where(eq(eventClusters.id, post.clusterId)).get()
   if (!cluster) return { code: 1 }
+
+  // show_edit / cancel_edit — toggle the inline edit textbox without changing
+  // any DB state. Re-render the review card with the post in (or out of) edit
+  // mode. Cards have one source of truth: Lark's rendered state, patched in
+  // place via larkPatch.
+  if (actionType === 'show_edit' || actionType === 'cancel_edit') {
+    const clusterPosts = db.select()
+      .from(generatedPosts)
+      .where(eq(generatedPosts.clusterId, cluster.id))
+      .all()
+    try {
+      await updateReviewCardMode(
+        messageId,
+        cluster,
+        clusterPosts,
+        actionType === 'show_edit' ? postId : undefined,
+      )
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`${actionType} patch failed (post=${postId}): ${msg}`)
+      return { code: 1, toast: { type: 'error', content: 'Could not update card. Try again.' } }
+    }
+    return { code: 0 }
+  }
 
   if (actionType === 'approve') {
     let landedIn: 'dm' | 'thread' | 'none' = 'none'

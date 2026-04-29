@@ -157,7 +157,26 @@ function twoColumnButtons(left: object, right: object) {
 
 // ====================== Cards ======================
 
-function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object {
+/**
+ * Build the review card.
+ *
+ * Two render modes per post, controlled by `editingPostId`:
+ *   - read-only (default): just the tweet quote and [Approve][Reject][Edit]
+ *     buttons. The textbox is hidden — reviewers who want to approve as-is
+ *     do it in two clicks (read → approve), no form-filling vibe.
+ *   - edit mode (only when post.id === editingPostId): the textbox appears
+ *     pre-filled with the current content, plus [Save edit][Cancel] and the
+ *     usual [Approve][Reject] buttons. Triggered by clicking Edit; the
+ *     handler patches the card to swap in this view.
+ *
+ * Multi-post clusters (rare under the pure_news lock) render each post
+ * independently — only the post that was clicked enters edit mode.
+ */
+function buildReviewCard(
+  cluster: EventCluster,
+  posts: GeneratedPost[],
+  opts: { editingPostId?: string } = {},
+): object {
   const elements: object[] = []
 
   const { names: sourceNames, earliest } = getClusterSources(cluster)
@@ -192,53 +211,58 @@ function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object 
     const displayContent = isPureNews
       ? post.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
       : post.content
+    const isEditing = opts.editingPostId === post.id
 
     elements.push({ tag: 'hr' })
     elements.push(md(`**${badge}** ${isPureNews ? '_(no link — tweet only)_' : ''}  ·  Score: ${post.estimatedScore ?? 'N/A'}/10`))
 
-    // Read-only display of the proposed tweet — this is what reviewers read
-    // 90% of the time before clicking Approve. Quote-style for readability.
+    // Tweet quote — always shown so the reviewer can read the proposed text.
     const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
     elements.push(md(`_${displayContent.length}/280 chars_`))
 
-    // Primary actions FIRST — most reviews skip the edit step entirely.
-    // Putting Approve/Reject before the edit form makes the common path
-    // a one-click action instead of looking like the card is asking you
-    // to fill in a form.
-    elements.push(twoColumnButtons(
-      callbackButton({ text: '✅ Approve & Copy', type: 'primary', action: 'approve', postId: post.id }),
-      callbackButton({ text: '❌ Reject',          type: 'danger',  action: 'reject',  postId: post.id }),
-    ))
-
-    // Secondary inline-edit affordance. Reviewer types in the box and presses
-    // Save edit if they want to tweak wording before approving. Submits
-    // `form_value.edited_content_<postId>` with the action callback, which
-    // route.ts:extractFormString resolves into action.value.editedContent.
-    elements.push(md('_Tweak wording? Edit below and press Save, then Approve._'))
-    elements.push({
-      tag: 'form',
-      name: `edit_form_${post.id}`,
-      elements: [
-        {
-          tag: 'input',
-          // Lark requires globally-unique input names across the whole card.
-          // Scoped per post for safety even on single-post cards.
-          name: `edited_content_${post.id}`,
-          input_type: 'multiline_text',
-          rows: 3,
-          default_value: displayContent,
-          placeholder: plainText('Edited tweet text'),
-        },
-        callbackButton({
-          text: '💾 Save edit',
-          type: 'default',
-          action: 'save_edit',
-          postId: post.id,
-          formSubmit: true,
-        }),
-      ],
-    })
+    if (isEditing) {
+      // ── Edit mode ────────────────────────────────────────────────────
+      // Textbox + Save / Cancel, plus Approve / Reject still visible so
+      // a reviewer can change their mind without saving an edit.
+      elements.push(md('_Edit the wording below, then press Save (or Cancel to discard)._'))
+      elements.push({
+        tag: 'form',
+        name: `edit_form_${post.id}`,
+        elements: [
+          {
+            tag: 'input',
+            // Lark requires globally-unique input names across the whole card.
+            name: `edited_content_${post.id}`,
+            input_type: 'multiline_text',
+            rows: 3,
+            default_value: displayContent,
+            placeholder: plainText('Edited tweet text'),
+          },
+          callbackButton({
+            text: '💾 Save edit',
+            type: 'primary',
+            action: 'save_edit',
+            postId: post.id,
+            formSubmit: true,
+          }),
+        ],
+      })
+      elements.push(twoColumnButtons(
+        callbackButton({ text: '↩️ Cancel edit', type: 'default', action: 'cancel_edit', postId: post.id }),
+        callbackButton({ text: '✅ Approve',     type: 'primary', action: 'approve',     postId: post.id }),
+      ))
+      elements.push(callbackButton({ text: '❌ Reject', type: 'danger', action: 'reject', postId: post.id }))
+    } else {
+      // ── Read-only mode (default) ─────────────────────────────────────
+      // Approve is the headline action. Edit is secondary, on its own row,
+      // so the card doesn't visually advertise editing as the primary path.
+      elements.push(twoColumnButtons(
+        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
+        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
+      ))
+      elements.push(callbackButton({ text: '✏️ Edit', type: 'default', action: 'show_edit', postId: post.id }))
+    }
   }
 
   // Pause bot at the bottom
@@ -330,8 +354,8 @@ function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorN
         md(`_${post.content.length}/280 chars_`),
         // After edit, offer Approve / Reject again so the reviewer can publish or kill in one click.
         twoColumnButtons(
-          callbackButton({ text: '✅ Approve & Copy', type: 'primary', action: 'approve', postId: post.id }),
-          callbackButton({ text: '❌ Reject',          type: 'danger',  action: 'reject',  postId: post.id }),
+          callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
+          callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
         ),
       ],
     },
@@ -374,6 +398,24 @@ export async function updateGroupCardEdited(
   actorName: string,
 ): Promise<void> {
   const card = buildEditedGroupCard(cluster, post, actorName)
+  await larkPatch(`/im/v1/messages/${messageId}`, {
+    msg_type: 'interactive',
+    content: JSON.stringify(card),
+  })
+}
+
+/**
+ * Patch the review card to switch a post into edit mode (textbox visible) or
+ * back to read-only mode. Used by the show_edit and cancel_edit callbacks.
+ * Pass `editingPostId: undefined` to render the read-only version.
+ */
+export async function updateReviewCardMode(
+  messageId: string,
+  cluster: EventCluster,
+  posts: GeneratedPost[],
+  editingPostId?: string,
+): Promise<void> {
+  const card = buildReviewCard(cluster, posts, { editingPostId })
   await larkPatch(`/im/v1/messages/${messageId}`, {
     msg_type: 'interactive',
     content: JSON.stringify(card),
