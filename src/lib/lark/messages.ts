@@ -155,6 +155,18 @@ function twoColumnButtons(left: object, right: object) {
   }
 }
 
+function threeColumnButtons(left: object, middle: object, right: object) {
+  return {
+    tag: 'column_set',
+    flex_mode: 'none',
+    columns: [
+      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
+      { tag: 'column', width: 'weighted', weight: 1, elements: [middle] },
+      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
+    ],
+  }
+}
+
 // ====================== Cards ======================
 
 /**
@@ -172,7 +184,7 @@ function twoColumnButtons(left: object, right: object) {
  * Multi-post clusters (rare under the pure_news lock) render each post
  * independently — only the post that was clicked enters edit mode.
  */
-function buildReviewCard(
+export function buildReviewCard(
   cluster: EventCluster,
   posts: GeneratedPost[],
   opts: { editingPostId?: string } = {},
@@ -187,22 +199,30 @@ function buildReviewCard(
   let topics: string[] = []
   try { topics = JSON.parse(cluster.topics ?? '[]') } catch { topics = [] }
 
-  // Headline
+  // ── Header block — single condensed metadata line per row ─────────────
   elements.push(md(`**${cluster.canonicalHeadline}**`))
 
-  // Time + sources row
   const sourceLine = sourceNames.length > 0 ? sourceNames.join(' · ') : 'Unknown source'
-  elements.push(md(`🕐 **${timeAgo}** (${absTime})  ·  📰 ${sourceLine}`))
+  elements.push({
+    tag: 'note',
+    elements: [
+      plainText(`🕐 ${timeAgo} (${absTime})  ·  📰 ${sourceLine}`),
+    ],
+  })
 
-  // Category + topic tags row
   const allTags = [categoryLabel, ...topics.map(englishTag)]
-  elements.push(md(allTags.join('  ·  ') + `  ·  Sources: ${cluster.sourceCount ?? 1}  ·  Score: **${(cluster.relevanceScore ?? 0).toFixed(1)}**/10`))
+  elements.push({
+    tag: 'note',
+    elements: [
+      plainText(`${allTags.join('  ·  ')}  ·  Score ${(cluster.relevanceScore ?? 0).toFixed(1)}/10`),
+    ],
+  })
 
-  // Risk warning
+  // Risk warning — only when actually elevated
   if (cluster.riskLevel === 'high') {
-    elements.push(md('⚠️ **HIGH RISK** — Review carefully before approving'))
+    elements.push(md('🚨 **HIGH RISK** — review carefully before approving'))
   } else if (cluster.riskLevel === 'medium') {
-    elements.push(md('⚠️ Medium risk — double check before approving'))
+    elements.push(md('⚠️ Medium risk — double-check before approving'))
   }
 
   for (const post of posts) {
@@ -214,25 +234,26 @@ function buildReviewCard(
     const isEditing = opts.editingPostId === post.id
 
     elements.push({ tag: 'hr' })
-    elements.push(md(`**${badge}** ${isPureNews ? '_(no link — tweet only)_' : ''}  ·  Score: ${post.estimatedScore ?? 'N/A'}/10`))
 
-    // Tweet quote — always shown so the reviewer can read the proposed text.
+    // Mode badge + char count on one tight line
+    elements.push(md(`**${badge}**  ·  _${displayContent.length}/280 chars_`))
+
+    // Tweet quote — always visible so reviewer can read before deciding
     const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
-    elements.push(md(`_${displayContent.length}/280 chars_`))
 
     if (isEditing) {
       // ── Edit mode ────────────────────────────────────────────────────
-      // Textbox + Save / Cancel, plus Approve / Reject still visible so
-      // a reviewer can change their mind without saving an edit.
-      elements.push(md('_Edit the wording below, then press Save (or Cancel to discard)._'))
+      elements.push({
+        tag: 'note',
+        elements: [plainText('Edit the wording below, then Save (or Cancel to discard).')],
+      })
       elements.push({
         tag: 'form',
         name: `edit_form_${post.id}`,
         elements: [
           {
             tag: 'input',
-            // Lark requires globally-unique input names across the whole card.
             name: `edited_content_${post.id}`,
             input_type: 'multiline_text',
             rows: 3,
@@ -248,20 +269,21 @@ function buildReviewCard(
           }),
         ],
       })
-      elements.push(twoColumnButtons(
-        callbackButton({ text: '↩️ Cancel edit', type: 'default', action: 'cancel_edit', postId: post.id }),
-        callbackButton({ text: '✅ Approve',     type: 'primary', action: 'approve',     postId: post.id }),
+      elements.push(threeColumnButtons(
+        callbackButton({ text: '↩️ Cancel', type: 'default', action: 'cancel_edit', postId: post.id }),
+        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve',    postId: post.id }),
+        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',     postId: post.id }),
       ))
-      elements.push(callbackButton({ text: '❌ Reject', type: 'danger', action: 'reject', postId: post.id }))
     } else {
       // ── Read-only mode (default) ─────────────────────────────────────
-      // Approve is the headline action. Edit is secondary, on its own row,
-      // so the card doesn't visually advertise editing as the primary path.
-      elements.push(twoColumnButtons(
-        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
-        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
+      // 3-column action row: green | gray | red. Visually balanced —
+      // Approve is primary, Reject is danger, Edit sits between as a
+      // neutral secondary action.
+      elements.push(threeColumnButtons(
+        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve',    postId: post.id }),
+        callbackButton({ text: '✏️ Edit',    type: 'default', action: 'show_edit',  postId: post.id }),
+        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',     postId: post.id }),
       ))
-      elements.push(callbackButton({ text: '✏️ Edit', type: 'default', action: 'show_edit', postId: post.id }))
     }
   }
 

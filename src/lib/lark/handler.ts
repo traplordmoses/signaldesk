@@ -3,8 +3,7 @@ import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/sche
 import { eq } from 'drizzle-orm'
 import {
   updateGroupCard,
-  updateGroupCardEdited,
-  updateReviewCardMode,
+  buildReviewCard,
   sendApprovalDM,
   sendApprovalThreadReply,
   sendBotStatusToGroup,
@@ -32,6 +31,7 @@ interface CallbackPayload {
 export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   code: number
   toast?: { type: string; content: string }
+  card?: { type: 'raw'; data: object }
 }> {
   const { action, operator, context } = payload
   const { postId, action: actionType } = action.value
@@ -63,27 +63,24 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   if (!cluster) return { code: 1 }
 
   // show_edit / cancel_edit — toggle the inline edit textbox without changing
-  // any DB state. Re-render the review card with the post in (or out of) edit
-  // mode. Cards have one source of truth: Lark's rendered state, patched in
-  // place via larkPatch.
+  // any DB state. Returns the new card *inline* in the callback response —
+  // Schema 2.0's preferred update mechanism. The earlier separate-PATCH-call
+  // approach silently no-op'd in production: the API returned 200/code:0 but
+  // Lark's client-side renderer doesn't always re-paint a patched card when
+  // the structure changes (e.g. read-only → form). Inline `card.type: 'raw'`
+  // forces a re-render atomically with the click.
   if (actionType === 'show_edit' || actionType === 'cancel_edit') {
     const clusterPosts = db.select()
       .from(generatedPosts)
       .where(eq(generatedPosts.clusterId, cluster.id))
       .all()
-    try {
-      await updateReviewCardMode(
-        messageId,
-        cluster,
-        clusterPosts,
-        actionType === 'show_edit' ? postId : undefined,
-      )
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.error(`${actionType} patch failed (post=${postId}): ${msg}`)
-      return { code: 1, toast: { type: 'error', content: 'Could not update card. Try again.' } }
+    const card = buildReviewCard(cluster, clusterPosts, {
+      editingPostId: actionType === 'show_edit' ? postId : undefined,
+    })
+    return {
+      code: 0,
+      card: { type: 'raw', data: card },
     }
-    return { code: 0 }
   }
 
   if (actionType === 'approve') {
@@ -208,11 +205,6 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         .where(eq(generatedPosts.id, postId))
         .run()
 
-      const updatedPost = db.select().from(generatedPosts).where(eq(generatedPosts.id, postId)).get()
-      if (updatedPost && updatedPost.larkMessageId) {
-        await updateGroupCardEdited(updatedPost.larkMessageId, cluster, updatedPost, actorName)
-      }
-
       db.insert(auditLog).values({
         id: crypto.randomUUID(),
         eventType: 'post_edited',
@@ -222,6 +214,21 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
         details: JSON.stringify({ clusterId: cluster.id, charCount: editedContent.length }),
         createdAt: Date.now(),
       }).run()
+
+      // Re-render the review card inline (read-only, with the new content).
+      // Same atomic mechanism as show_edit / cancel_edit — sidesteps the
+      // silent no-op that the separate larkPatch path can hit when a card's
+      // structure changes between sends.
+      const clusterPosts = db.select()
+        .from(generatedPosts)
+        .where(eq(generatedPosts.clusterId, cluster.id))
+        .all()
+      const card = buildReviewCard(cluster, clusterPosts)
+      return {
+        code: 0,
+        toast: { type: 'success', content: 'Edit saved.' },
+        card: { type: 'raw', data: card },
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       db.insert(auditLog).values({
@@ -235,8 +242,6 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
       }).run()
       return { code: 1, toast: { type: 'error', content: 'Could not save edit.' } }
     }
-
-    return { code: 0, toast: { type: 'success', content: 'Draft updated.' } }
   }
 
   return { code: 0 }
