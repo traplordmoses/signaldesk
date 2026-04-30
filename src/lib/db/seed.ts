@@ -37,7 +37,13 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'fed_monetary',      name: 'Federal Reserve Monetary Policy', url: 'https://www.federalreserve.gov/feeds/press_monetary.xml', category: 'economics', weight: 10 },
   { id: 'fed_speeches',      name: 'Federal Reserve Speeches',        url: 'https://www.federalreserve.gov/feeds/speeches.xml',       category: 'economics', weight: 9  },
   { id: 'fed_testimony',     name: 'Federal Reserve Testimony',       url: 'https://www.federalreserve.gov/feeds/testimony.xml',      category: 'economics', weight: 9  },
-  { id: 'sec_8k_current',    name: 'SEC Current 8-K Filings',         url: 'signaldesk://sec/current?type=8-K&count=100',             category: 'economics', weight: 10 },
+  // sec_8k_current intentionally removed — even with item-number filtering,
+  // 8-K filings (CEO changes, bankruptcies, M&A on individual public companies)
+  // didn't map to the prediction-market audience the bot writes for. The cards
+  // also tended to make the LLM hallucinate generic financial commentary in
+  // the second sentence. If we want a financial-filings angle later, a more
+  // targeted source (e.g. specific tickers being traded as Polymarket markets)
+  // would be the right path.
   { id: 'prnewswire_all',    name: 'PR Newswire All Releases',        url: 'https://www.prnewswire.com/rss/news-releases-list.rss',    category: 'economics', weight: 7  },
   { id: 'cisa_kev',          name: 'CISA Known Exploited Vulnerabilities', url: 'signaldesk://cisa/kev',                              category: 'cyber',     weight: 9  },
   { id: 'nws_severe_alerts', name: 'National Weather Service Severe Alerts', url: 'signaldesk://nws/severe-alerts',                   category: 'weather',   weight: 8  },
