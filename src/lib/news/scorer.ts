@@ -104,6 +104,20 @@ export function scoreItem(title: string, summary: string, weight: number, publis
   if (ageHours < 1) score += 1.0
   else if (ageHours < 3) score += 0.5
 
+  // Market-relevance bonus — +0..3 based on whether the headline matches an
+  // entity from any active high-volume Polymarket / Kalshi market. Pulled
+  // from a 5-min in-memory cache built from the `market_topics` table.
+  // Lazy import keeps this file from circular-importing the markets module.
+  // Fail-safe: if the markets module can't load (e.g. during boot before
+  // the table exists), return 0 and continue.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { relevanceBoost } = require('@/lib/markets') as typeof import('@/lib/markets')
+    score += relevanceBoost(title, summary)
+  } catch {
+    // markets module not available — no boost, continue
+  }
+
   return Math.min(10, score)
 }
 

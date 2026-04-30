@@ -8,7 +8,7 @@ let started = false
 
 // Per-task overlap guards. Without these, a slow run of `runFetch` would let the
 // next 5-min tick stack on top of itself — eventually saturating Together AI / DB.
-const running = { fetch: false, generate: false, prune: false }
+const running = { fetch: false, generate: false, prune: false, markets: false }
 
 const AUDIT_LOG_RETENTION_DAYS  = 30
 const NEWS_ITEM_RETENTION_DAYS  = 14   // only items already isProcessed=1
@@ -176,6 +176,31 @@ async function runAutoGenerate() {
   }
 }
 
+// Refresh the prediction-market relevance signal — pulls top markets/events
+// from Polymarket + Kalshi, runs LLM topic extraction on any new ones, and
+// refreshes the cached entity → volume map used by `scoreItem` to apply a
+// relevance boost. Runs hourly + once on startup. Failures are non-fatal:
+// the scorer falls back to base scoring with no boost when the cache is empty.
+async function runMarketsRefresh() {
+  if (running.markets) {
+    console.warn('[cron] markets refresh skipped — previous run still in progress')
+    return
+  }
+  running.markets = true
+  try {
+    const { refreshMarketTopics } = await import('@/lib/markets')
+    const r = await refreshMarketTopics()
+    console.log(`[cron] markets refresh: poly=${r.polymarket} kalshi=${r.kalshi} new_extractions=${r.newExtractions}${r.errors.length ? ` errors=${r.errors.length}` : ''}`)
+    if (r.errors.length > 0) {
+      for (const err of r.errors.slice(0, 3)) console.warn(`[cron] markets:`, err)
+    }
+  } catch (e) {
+    console.error('[cron] markets refresh failed:', (e as Error).message)
+  } finally {
+    running.markets = false
+  }
+}
+
 // Tracks the registered cron tasks so the shutdown handler can stop them
 // before closing the DB. Without this, an in-flight cron task could try to
 // write to a closed sqlite handle.
@@ -225,6 +250,10 @@ export function startScheduler() {
   scheduledTasks.push(cron.schedule('*/5 * * * *', runFetch))
   scheduledTasks.push(cron.schedule('*/15 * * * *', runAutoGenerate))
   scheduledTasks.push(cron.schedule('0 3 * * *', runPrune))  // daily 03:00 — prune audit_log & old processed items
+  scheduledTasks.push(cron.schedule('7 * * * *', runMarketsRefresh))  // hourly at :07 — keep market-relevance signal warm
+  // Run an immediate market refresh on startup so the scorer has data to
+  // boost against before the first hourly tick.
+  void runMarketsRefresh()
 
   registerGracefulShutdown()
 

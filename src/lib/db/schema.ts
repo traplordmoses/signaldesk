@@ -88,3 +88,27 @@ export const settings = sqliteTable('settings', {
   larkEnabled: integer('lark_enabled').default(1),
   updatedAt: integer('updated_at').notNull(),
 })
+
+/**
+ * Cached topics from prediction-market platforms (Polymarket, Kalshi, etc.)
+ * One row per market/event we've extracted topics for. Keyword extraction is
+ * an LLM call, so we cache aggressively — the topic for a given market doesn't
+ * meaningfully change. The hourly refresh task only re-extracts when a market
+ * we haven't seen before appears, or every 7 days as a freshness backstop.
+ *
+ * Used by news scorer to apply a relevance boost when a fresh news headline
+ * matches an entity from any high-volume market currently being traded.
+ */
+export const marketTopics = sqliteTable('market_topics', {
+  // Composite primary key: source + market_id  e.g. "poly:0x123...", "kalshi:KXFEDDECISION-26MAY"
+  id: text('id').primaryKey(),
+  source: text('source').notNull(),         // 'polymarket' | 'kalshi'
+  marketId: text('market_id').notNull(),    // platform-native market/event id
+  question: text('question').notNull(),     // human-readable question text
+  volume24h: real('volume_24h').default(0), // recent activity, drives the bonus weight
+  topic: text('topic'),                     // canonical short topic, e.g. "ECB rate decision"
+  entities: text('entities'),               // JSON array of keywords/entities for matching
+  category: text('category'),               // economics | politics | crypto | sports | culture | other
+  extractedAt: integer('extracted_at').notNull(),  // when the LLM topic call ran
+  lastSeenAt: integer('last_seen_at').notNull(),   // last refresh that found this market
+})
