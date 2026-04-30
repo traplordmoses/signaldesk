@@ -44,7 +44,14 @@ export const DEFAULT_NEWS_SOURCES = [
   // the second sentence. If we want a financial-filings angle later, a more
   // targeted source (e.g. specific tickers being traded as Polymarket markets)
   // would be the right path.
-  { id: 'prnewswire_all',    name: 'PR Newswire All Releases',        url: 'https://www.prnewswire.com/rss/news-releases-list.rss',    category: 'economics', weight: 7  },
+  //
+  // prnewswire_all intentionally removed for the same reason — same noise
+  // shape as 8-Ks: the daily flood of corporate quarterly earnings press
+  // releases ("Acme Corp announces Q1 2026 earnings", "Forum Markets
+  // announces earnings call date", "BRC Group Holdings Q1 2026 earnings
+  // call") drove low-signal cards and hallucinated analyst-style second
+  // sentences. Real M&A / executive-departure / regulatory-action news
+  // arrives via Reuters, AP, FT, Bloomberg etc. anyway.
   { id: 'cisa_kev',          name: 'CISA Known Exploited Vulnerabilities', url: 'signaldesk://cisa/kev',                              category: 'cyber',     weight: 9  },
   { id: 'nws_severe_alerts', name: 'National Weather Service Severe Alerts', url: 'signaldesk://nws/severe-alerts',                   category: 'weather',   weight: 8  },
   { id: 'usgs_quakes_sig',   name: 'USGS Significant Earthquakes',    url: 'signaldesk://usgs/significant-quakes',                   category: 'weather',   weight: 8  },

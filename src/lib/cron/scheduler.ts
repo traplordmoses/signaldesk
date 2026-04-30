@@ -113,11 +113,27 @@ async function runAutoGenerate() {
       return
     }
 
-    console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}`)
+    // Highest-scored first, so when the per-cycle cap kicks in we always
+    // generate the best stories. Tie-broken by recency (newer first).
+    candidates.sort((a, b) => {
+      const scoreDiff = (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0)
+      if (scoreDiff !== 0) return scoreDiff
+      return (b.firstSeenAt ?? 0) - (a.firstSeenAt ?? 0)
+    })
+
+    // Per-cycle cap. Without this, a backlog (e.g. just after the daily cap
+    // resets) dumps every queued candidate into the chat in one tick — 12
+    // cards at once. Cap at 5 per cycle: the rest stay status='new' and
+    // qualify on the next tick (15 min later).
+    const PER_CYCLE_CAP = 5
+    const trimmed = candidates.slice(0, PER_CYCLE_CAP)
+    const deferred = candidates.length - trimmed.length
+
+    console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}${deferred > 0 ? ` — generating top ${trimmed.length}, deferring ${deferred} to next cycle` : ''}`)
 
     const { generateSmartPosts } = await import('@/lib/ai/generator')
 
-    for (const cluster of candidates) {
+    for (const cluster of trimmed) {
       try {
         const posts = await generateSmartPosts(cluster)
         console.log(`[cron] generated ${posts.length} posts for: ${cluster.canonicalHeadline.slice(0, 50)}`)
