@@ -65,6 +65,41 @@ async function runFetch() {
   }
 }
 
+// Pending posts that haven't been approved/rejected after this many ms get
+// flipped to status='expired' so they drop out of the dashboard's Pending
+// Review count. 8h matches the natural decay of BREAKING/JUST IN framing —
+// a card sitting unapproved past one work shift is almost certainly too
+// stale to tweet as breaking news. The card stays in Lark chat (we don't
+// patch it visually); the handler still accepts a manual approve/reject
+// click on it if a reviewer decides it's still worth posting.
+const PENDING_TTL_MS = 8 * 60 * 60 * 1000
+
+function expireStalePendingPosts(): number {
+  const cutoff = Date.now() - PENDING_TTL_MS
+  const stale = db.select()
+    .from(generatedPosts)
+    .where(
+      and(
+        eq(generatedPosts.status, 'pending'),
+        gt(generatedPosts.createdAt, 0),  // sanity bound
+      )
+    )
+    .all()
+    .filter(p => p.createdAt < cutoff)
+
+  if (stale.length === 0) return 0
+
+  const now = Date.now()
+  for (const post of stale) {
+    db.update(generatedPosts)
+      .set({ status: 'expired', updatedAt: now })
+      .where(eq(generatedPosts.id, post.id))
+      .run()
+  }
+  console.log(`[cron] expired ${stale.length} pending post(s) older than ${PENDING_TTL_MS / 3600000}h`)
+  return stale.length
+}
+
 async function runAutoGenerate() {
   if (running.generate) {
     console.warn('[cron] auto-generate skipped — previous run still in progress')
@@ -73,6 +108,10 @@ async function runAutoGenerate() {
   running.generate = true
   const startedAt = Date.now()
   try {
+    // Drain stale pending posts before generating new ones — keeps the
+    // dashboard's Pending Review count tracking what's actually actionable.
+    expireStalePendingPosts()
+
     const config = db.select().from(settings).where(eq(settings.id, 'singleton')).get()
     const threshold = config?.autoGenerateThreshold ?? 6.5
     const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000
