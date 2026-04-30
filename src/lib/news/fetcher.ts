@@ -261,6 +261,41 @@ async function fetchRssSource(source: SourceRecord): Promise<NormalizedItem[]> {
   return items
 }
 
+// 8-K item numbers worth tweeting about. Routine earnings (2.02), Reg FD
+// (7.01), and the boilerplate exhibits attachment (9.01) are deliberately
+// excluded — they fire dozens of times per day during earnings season and
+// produce low-signal cards that make the LLM hallucinate generic financial
+// commentary in the second sentence. The signal-to-noise of an 8-K with
+// ONLY 2.02 + 9.01 items is near zero for a prediction-market audience.
+const HIGH_SIGNAL_8K_ITEMS = new Set([
+  '1.01',  // Entry into a Material Definitive Agreement
+  '1.02',  // Termination of a Material Definitive Agreement
+  '1.03',  // Bankruptcy or Receivership
+  '2.01',  // Completion of Acquisition or Disposition of Assets
+  '2.04',  // Triggering Events That Accelerate or Increase a Financial Obligation
+  '2.05',  // Costs Associated with Exit or Disposal Activities
+  '2.06',  // Material Impairments
+  '3.01',  // Notice of Delisting
+  '3.02',  // Unregistered Sales of Equity Securities
+  '4.01',  // Changes in Registrant's Certifying Accountant
+  '4.02',  // Non-Reliance on Previously Issued Financial Statements
+  '5.01',  // Changes in Control of Registrant
+  '5.02',  // Departure / Election of Directors or Certain Officers
+  '5.03',  // Amendments to Articles of Incorporation or Bylaws
+  '5.07',  // Submission of Matters to a Vote of Security Holders
+  '8.01',  // Other Events (catch-all that's often genuinely material)
+])
+
+// Pull "Item N.NN" mentions out of the SEC atom-feed summary. The atom
+// summary is HTML when fetched but rss-parser flattens it to plaintext like:
+//   "Filed: 2026-04-30 ... Item 2.02: Results of Operations ... Item 9.01: ..."
+function parseItemNumbers(summary: string): string[] {
+  const matches = summary.matchAll(/Item\s+(\d+\.\d+)\b/gi)
+  const out: string[] = []
+  for (const m of matches) out.push(m[1])
+  return out
+}
+
 async function fetchSecCurrent(source: SourceRecord, sourceUrl: URL): Promise<NormalizedItem[]> {
   const filingType = sourceUrl.searchParams.get('type') ?? '8-K'
   const count = sourceUrl.searchParams.get('count') ?? '100'
@@ -275,13 +310,29 @@ async function fetchSecCurrent(source: SourceRecord, sourceUrl: URL): Promise<No
   const feed = await parser.parseString(xml)
   const items: NormalizedItem[] = []
 
+  // Only filter 8-Ks. Other filing types (10-K, 10-Q, etc.) pass through
+  // unfiltered — they don't have the same item-number structure.
+  const isEightK = filingType.toUpperCase() === '8-K'
+
   for (const entry of (feed.items ?? []) as RssEntry[]) {
     const rawUrl = entry.link ?? entry.guid ?? ''
     if (!rawUrl) continue
 
+    const summary = entry.contentSnippet ?? entry.summary ?? entry.content ?? ''
+
+    // 8-K item filter: keep ONLY filings with at least one high-signal item.
+    // A filing with item 2.02 alone (earnings) gets dropped; a filing with
+    // 1.01 + 7.01 stays (because 1.01 is in the keep list).
+    if (isEightK) {
+      const itemNumbers = parseItemNumbers(summary)
+      if (itemNumbers.length === 0) continue   // no items parsed → skip defensively
+      const hasHighSignal = itemNumbers.some(n => HIGH_SIGNAL_8K_ITEMS.has(n))
+      if (!hasHighSignal) continue
+    }
+
     const item = toNormalizedItem(source, {
       title: entry.title ?? `${filingType} filing`,
-      summary: entry.contentSnippet ?? entry.summary ?? entry.content ?? '',
+      summary,
       url: absoluteUrl(rawUrl, 'https://www.sec.gov/'),
       publishedAt: parseTimestamp(entry.isoDate ?? entry.pubDate ?? entry.updated),
     })
