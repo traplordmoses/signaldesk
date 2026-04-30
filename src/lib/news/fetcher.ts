@@ -1,6 +1,6 @@
 import Parser from 'rss-parser'
 import { createHash, randomUUID } from 'crypto'
-import { db } from '@/lib/db'
+import { db, sqlite } from '@/lib/db'
 import { newsSources, newsItems, auditLog } from '@/lib/db/schema'
 import { eq, gt, and } from 'drizzle-orm'
 import { scoreItem, detectRisk } from './scorer'
@@ -509,6 +509,54 @@ async function fetchOpenFdaEnforcement(source: SourceRecord, sourceUrl: URL): Pr
   return items
 }
 
+// Targeted news fetch driven by the prediction-market relevance signal.
+// Reads top markets from the cached `market_topics` table (populated by
+// the markets refresh cron), then queries Google News for fresh articles
+// on each topic. Surfaces stories that the broad RSS firehose may not
+// have flagged but that the audience is actively betting on (e.g.
+// niche-ticker earnings news, region-specific election coverage).
+//
+// Google News RSS supports `when:Nd` to limit to recent articles —
+// keeps each query small and recent. Free, no auth, ~10 markets per tick.
+async function fetchMarketDrivenNews(source: SourceRecord): Promise<NormalizedItem[]> {
+  const TOP_N = 8
+  const rows = sqlite.prepare<[number], { topic: string | null; volume_24h: number | null }>(
+    'SELECT topic, volume_24h FROM market_topics WHERE topic IS NOT NULL ORDER BY volume_24h DESC LIMIT ?'
+  ).all(TOP_N)
+
+  const items: NormalizedItem[] = []
+  const seenUrls = new Set<string>()
+
+  for (const row of rows) {
+    if (!row.topic) continue
+    const query = encodeURIComponent(`${row.topic} when:2d`)
+    const url = `https://news.google.com/rss/search?q=${query}&hl=en-US&gl=US&ceid=US:en`
+
+    try {
+      const xml = await fetchText(url, { 'Accept': 'application/rss+xml, application/xml, text/xml' })
+      const feed = await parser.parseString(xml)
+      for (const entry of (feed.items ?? []) as RssEntry[]) {
+        const articleUrl = entry.link ?? entry.guid ?? ''
+        if (!articleUrl || seenUrls.has(articleUrl)) continue
+        seenUrls.add(articleUrl)
+
+        const item = toNormalizedItem(source, {
+          title: entry.title ?? '',
+          summary: entry.contentSnippet ?? entry.summary ?? entry.content ?? '',
+          url: articleUrl,
+          publishedAt: parseTimestamp(entry.isoDate ?? entry.pubDate ?? entry.updated),
+        })
+        if (item) items.push(item)
+      }
+    } catch (err) {
+      // Per-topic failure is non-fatal; other topics still ingest.
+      console.warn(`[fetcher] markets/google-news topic="${row.topic}" failed: ${(err as Error).message}`)
+    }
+  }
+
+  return items
+}
+
 async function fetchSignaldeskSource(source: SourceRecord): Promise<NormalizedItem[]> {
   const sourceUrl = new URL(source.url)
   const route = `${sourceUrl.hostname}${sourceUrl.pathname}`
@@ -524,6 +572,8 @@ async function fetchSignaldeskSource(source: SourceRecord): Promise<NormalizedIt
       return fetchUsgsSignificantQuakes(source)
     case 'openfda/enforcement':
       return fetchOpenFdaEnforcement(source, sourceUrl)
+    case 'markets/google-news':
+      return fetchMarketDrivenNews(source)
     default:
       throw new Error(`Unsupported internal source adapter: ${route}`)
   }

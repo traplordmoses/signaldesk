@@ -23,6 +23,55 @@ const TIER3 = [
   'quarterly results', 'announced', 'confirmed', 'signed', 'reportedly',
 ]
 
+// Priority companies + indices the audience cares about during earnings
+// season and big macro days. Headlines mentioning any of these get a +1.5
+// score bump on top of the base scoring. Both common names ("apple",
+// "microsoft") and tickers ("aapl", "msft") are listed because news
+// headlines mix the two interchangeably. Keep the list tight — adding
+// the entire S&P 500 here would dilute the signal.
+const PRIORITY_TICKERS = [
+  // mag7
+  'apple', 'aapl',
+  'microsoft', 'msft',
+  'google', 'alphabet', 'googl', 'goog',
+  'amazon', 'amzn',
+  'meta', 'facebook',
+  'tesla', 'tsla',
+  'nvidia', 'nvda',
+
+  // big tech beyond mag7
+  'amd',
+  'oracle', 'orcl',
+  'salesforce',
+  'netflix', 'nflx',
+  'intel', 'intc',
+  'palantir', 'pltr',
+  'broadcom', 'avgo',
+
+  // big banks
+  'jpmorgan', 'jpm',
+  'goldman sachs', 'goldman',
+  'bank of america',
+  'wells fargo',
+  'morgan stanley',
+  'citigroup', 'citi',
+
+  // defense / oil / industrials
+  'lockheed martin',
+  'raytheon', 'rtx',
+  'boeing', 'ba',
+  'exxon', 'xom',
+  'chevron', 'cvx',
+
+  // indices
+  's&p 500', 'sp500', 'nasdaq', 'dow jones', 'russell 2000',
+
+  // crypto majors
+  'bitcoin', 'btc',
+  'ethereum', 'eth',
+  'solana', 'sol',
+]
+
 // TRAGEDY — auto-skip from generation. Keep this list narrow and unambiguous:
 // the bot must NEVER auto-write competing content during an active tragedy.
 // Keywords picked so they almost always indicate literal violence or loss of
@@ -97,6 +146,16 @@ export function scoreItem(title: string, summary: string, weight: number, publis
   // Source weight bonus
   if (weight >= 9) score += 1.0
   else if (weight >= 7) score += 0.5
+
+  // Priority-ticker bonus — headlines mentioning a mag7 company, big bank,
+  // major index, or BTC/ETH get +1.5. Caps at one bonus per article (we
+  // don't want a "Apple beats Microsoft on iPhone sales" double-counting).
+  for (const ticker of PRIORITY_TICKERS) {
+    if (wordBoundaryMatch(text, ticker)) {
+      score += 1.5
+      break
+    }
+  }
 
   // Recency bonus
   const ageMs = Date.now() - publishedAt

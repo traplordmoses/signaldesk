@@ -59,6 +59,13 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'openfda_device_recalls', name: 'openFDA Device Recalls',     url: 'signaldesk://openfda/enforcement?kind=device',            category: 'health',    weight: 8  },
   { id: 'openfda_food_recalls', name: 'openFDA Food Recalls',         url: 'signaldesk://openfda/enforcement?kind=food',              category: 'health',    weight: 8  },
 
+  // Markets-driven news pull — uses the cached prediction-market topics
+  // (Polymarket + Kalshi) to query Google News for recent articles on each
+  // top-volume market's topic. Surfaces stories the RSS firehose might miss,
+  // particularly niche-ticker / region-specific events that have active
+  // markets but limited mainstream wire coverage.
+  { id: 'markets_news_pull',  name: 'Markets Top-Topic News',          url: 'signaldesk://markets/google-news',                       category: 'economics', weight: 8  },
+
   // International + wire fallbacks (AP via feedx mirrors faster than Google News wrap)
   { id: 'feedx_ap',          name: 'AP via feedx',     url: 'https://feedx.net/rss/ap.xml',                          category: 'politics',  weight: 10 },
   { id: 'euronews',          name: 'Euronews',         url: 'https://www.euronews.com/rss',                          category: 'politics',  weight: 8  },
