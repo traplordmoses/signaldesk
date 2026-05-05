@@ -79,6 +79,36 @@ function checkForFabricatedPercentages(content: string, contextText: string): vo
   }
 }
 
+// Catches fabricated stock tickers. Real failure case from the May 5 review:
+// the model wrote "$FRMM" in a post when no ticker was in the source. Tickers
+// are unambiguous identifiers — if one shows up in the post but not in the
+// headline or summary, it was made up. We extract all $XXX-style symbols
+// (1-5 uppercase letters, optionally followed by a class suffix like .A) from
+// the output and require each to appear in the context. Throws on miss so the
+// post is rejected rather than shipped with a fake ticker.
+const TICKER_RE = /\$([A-Z]{1,5}(?:\.[A-Z])?)\b/g
+function checkForFabricatedTickers(content: string, contextText: string): void {
+  const out = new Set<string>()
+  for (const m of content.matchAll(TICKER_RE)) out.add(m[1].toUpperCase())
+  if (out.size === 0) return
+
+  // Match either "$FOO" / "$BRK.A" or a bare "FOO" capitalized in context (news
+  // headlines sometimes write "AAPL" without the dollar sign, e.g. "AAPL beats
+  // estimates"). We dedupe on the base symbol (everything before any `.`), so
+  // `$BRK.A` in the output matches a bare "BRK" in context.
+  const baseOf = (sym: string) => sym.split('.')[0]
+  const ctxTickers = new Set<string>()
+  for (const m of contextText.matchAll(TICKER_RE)) ctxTickers.add(baseOf(m[1].toUpperCase()))
+  const bareCapsRe = /\b([A-Z]{2,5})\b/g
+  for (const m of contextText.matchAll(bareCapsRe)) ctxTickers.add(m[1].toUpperCase())
+
+  for (const t of out) {
+    if (!ctxTickers.has(baseOf(t))) {
+      throw new Error(`fabricated ticker in output: $${t} — not present in input context`)
+    }
+  }
+}
+
 function validateAIResponse(raw: unknown): AIResponse {
   if (typeof raw !== 'object' || raw === null) throw new Error('AI response not an object')
   const r = raw as Record<string, unknown>
@@ -195,7 +225,14 @@ Now write one post.`
   }
   const validated = validateAIResponse(parsed)
   checkForFabricatedPercentages(validated.content, userPrompt)
+  checkForFabricatedTickers(validated.content, userPrompt)
   return validated
+}
+
+// Exported for tests only. Not part of the public API.
+export const __testing = {
+  checkForFabricatedPercentages,
+  checkForFabricatedTickers,
 }
 
 export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
