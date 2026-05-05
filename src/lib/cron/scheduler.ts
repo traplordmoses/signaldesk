@@ -162,9 +162,11 @@ async function runAutoGenerate() {
 
     // Per-cycle cap. Without this, a backlog (e.g. just after the daily cap
     // resets) dumps every queued candidate into the chat in one tick — 12
-    // cards at once. Cap at 5 per cycle: the rest stay status='new' and
-    // qualify on the next tick (15 min later).
-    const PER_CYCLE_CAP = 5
+    // cards at once. Cap at 2 per cycle: the rest stay status='new' and
+    // qualify on the next tick (5 min later). Combined with the 5-min cron
+    // interval this paces delivery at ~1 card every 2-3 minutes instead of
+    // batches landing all at once.
+    const PER_CYCLE_CAP = 2
     const trimmed = candidates.slice(0, PER_CYCLE_CAP)
     const deferred = candidates.length - trimmed.length
 
@@ -224,8 +226,8 @@ async function runAutoGenerate() {
     console.error('[cron] auto-generate run failed:', e)
   } finally {
     const durMs = Date.now() - startedAt
-    if (durMs > 10 * 60 * 1000) {
-      console.warn(`[cron] auto-generate took ${durMs}ms — approaching the 15-min tick interval`)
+    if (durMs > 4 * 60 * 1000) {
+      console.warn(`[cron] auto-generate took ${durMs}ms — approaching the 5-min tick interval`)
     }
     running.generate = false
   }
@@ -303,7 +305,7 @@ export function startScheduler() {
   started = true
 
   scheduledTasks.push(cron.schedule('*/5 * * * *', runFetch))
-  scheduledTasks.push(cron.schedule('*/15 * * * *', runAutoGenerate))
+  scheduledTasks.push(cron.schedule('*/5 * * * *', runAutoGenerate))
   scheduledTasks.push(cron.schedule('0 3 * * *', runPrune))  // daily 03:00 — prune audit_log & old processed items
   scheduledTasks.push(cron.schedule('7 * * * *', runMarketsRefresh))  // hourly at :07 — keep market-relevance signal warm
   // Run an immediate market refresh on startup so the scorer has data to
@@ -312,5 +314,5 @@ export function startScheduler() {
 
   registerGracefulShutdown()
 
-  console.log('[cron] scheduler started — fetch every 5min, generate every 15min, prune daily 03:00')
+  console.log('[cron] scheduler started — fetch every 5min, generate every 5min, prune daily 03:00')
 }
