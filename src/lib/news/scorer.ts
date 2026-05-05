@@ -85,6 +85,35 @@ const TRAGEDY = [
   'murder', 'murdered',
 ]
 
+// LOCAL_CRIME — routine local crime stories (Hong Kong burglaries, drug busts,
+// muggings) leaked through to cards in the May 5 review because the markets-
+// boost + source-weight + recency stack pushed them past the auto-generate
+// threshold. These are not prediction-market relevant. Each match deducts a
+// flat penalty from the final score so a single LOCAL_CRIME hit drops a
+// borderline story below the threshold without killing legitimate big-crime
+// stories that ALSO have TIER1 hits (e.g. "DOJ indicts cartel" still scores
+// in the 4-5 range and won't auto-generate, which is the right outcome — that
+// kind of story should come through manual review or via the indictment angle).
+//
+// Kept narrow on purpose: 'shooting' / 'bombing' / 'casualties' stay in the
+// TRAGEDY auto-skip list above. LOCAL_CRIME covers property crime + small-
+// scale drug enforcement only. Solo 'heroin' / 'cocaine' are excluded because
+// they appear in legitimate trafficking-policy and overdose-epidemic stories.
+const LOCAL_CRIME = [
+  'burglary', 'burglar',
+  'robbery',
+  'mugging', 'mugged',
+  'carjacking',
+  'drug bust', 'drug raid', 'narcotics raid',
+  'heroin bust', 'cocaine bust', 'cocaine seizure',
+  'arson',
+  'vandalism', 'vandalized',
+  'shoplifting',
+  'pickpocket',
+  'home invasion',
+]
+const LOCAL_CRIME_PENALTY = 3
+
 // HIGH_STAKES — show ⚠️ warning on the review card but still generate. These
 // are legitimate prediction-market-relevant breaking stories (Iran nuclear
 // talks, Trump indictments, DOJ moves, SEC charges, election results) that
@@ -178,7 +207,18 @@ export function scoreItem(title: string, summary: string, weight: number, publis
     // markets module not available — no boost, continue
   }
 
-  return Math.min(10, score)
+  // Local-crime penalty — applied AFTER all bonuses so it docks the final
+  // composite score. Capped at one penalty per article (a single mention is
+  // enough to flag the story type; we don't compound on "burglary suspect
+  // arrested in second burglary" double hits).
+  for (const kw of LOCAL_CRIME) {
+    if (wordBoundaryMatch(text, kw)) {
+      score -= LOCAL_CRIME_PENALTY
+      break
+    }
+  }
+
+  return Math.min(10, Math.max(0, score))
 }
 
 export function detectRisk(text: string): { level: 'low' | 'medium' | 'high'; reasons: string[] } {

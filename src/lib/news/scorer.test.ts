@@ -5,7 +5,7 @@
  * breaking-news the bot is built to cover.
  */
 import { describe, it, expect } from 'vitest'
-import { detectRisk } from './scorer'
+import { detectRisk, scoreItem } from './scorer'
 
 describe('detectRisk', () => {
   describe('TRAGEDY → high (auto-skip)', () => {
@@ -83,5 +83,46 @@ describe('detectRisk', () => {
       const result = detectRisk('Adjoining property sells for record price')
       expect(result.level).toBe('low')
     })
+  })
+})
+
+describe('scoreItem — LOCAL_CRIME penalty', () => {
+  // Use an old publishedAt to zero out the recency bonus and isolate the penalty.
+  const oldTs = Date.now() - 24 * 60 * 60 * 1000  // 24h ago
+  const lowWeight = 5  // no source-weight bonus
+
+  it('docks the score on a Hong Kong burglary headline', () => {
+    const score = scoreItem('Hong Kong police bust burglary ring in Kowloon', '', lowWeight, oldTs)
+    expect(score).toBe(0)  // 0 base - 3 penalty floors at 0
+  })
+
+  it('docks the score on a routine drug bust', () => {
+    const score = scoreItem('Local drug bust nets $50K in narcotics', '', lowWeight, oldTs)
+    expect(score).toBe(0)
+  })
+
+  it('does not dock legitimate trafficking-policy stories that only mention cocaine/heroin in passing', () => {
+    // 'cocaine' alone is intentionally NOT in LOCAL_CRIME — only 'cocaine bust'
+    // / 'cocaine seizure' is. A trafficking-policy story with a TIER1 hit
+    // ('indicted') should retain its full score.
+    const score = scoreItem('Cartel leader indicted on cocaine trafficking charges', '', lowWeight, oldTs)
+    expect(score).toBe(4)  // TIER1 'indicted' (+4), no penalty
+  })
+
+  it('does dock when both TIER1 and LOCAL_CRIME hit (penalty stacks correctly)', () => {
+    // 'indicted' (+4) + 'cocaine bust' LOCAL_CRIME (-3) = 1
+    const score = scoreItem('Local police indicted in cocaine bust scandal', '', lowWeight, oldTs)
+    expect(score).toBe(1)
+  })
+
+  it('does not double-penalize multiple LOCAL_CRIME hits in one headline', () => {
+    // "burglary" + "vandalism" both in LOCAL_CRIME — penalty caps at one
+    const score = scoreItem('Wave of burglary and vandalism reports across district', '', lowWeight, oldTs)
+    expect(score).toBe(0)  // 0 base - 3 penalty (one match), floored at 0
+  })
+
+  it('floors at 0 instead of going negative', () => {
+    const score = scoreItem('Burglary suspect arrested', '', lowWeight, oldTs)
+    expect(score).toBeGreaterThanOrEqual(0)
   })
 })
