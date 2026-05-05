@@ -509,6 +509,95 @@ async function fetchOpenFdaEnforcement(source: SourceRecord, sourceUrl: URL): Pr
   return items
 }
 
+// Allowlist of publishers we accept from Google News market-driven results.
+// Without this, every Google News query returns whatever ranks highest —
+// which on the May 5 review surfaced Crypto Briefing, Rolling Out, and
+// other low-trust outlets. We extract the publisher from the title (Google
+// News formats titles as "Article Title - Publisher") and skip everything
+// not on this list.
+//
+// Stored lowercase for case-insensitive matching. Add aliases (e.g. both
+// "the wall street journal" and "wsj") so we match however Google News
+// happens to render the publisher name. Trim aggressively if a publisher
+// keeps slipping through with a different rendering.
+const TRUSTED_GOOGLE_NEWS_PUBLISHERS = new Set<string>([
+  // Wire / major
+  'reuters', 'bloomberg', 'associated press', 'the associated press', 'ap news', 'afp',
+
+  // US national broadsheet
+  'the new york times', 'nytimes', 'nytimes.com', 'new york times', 'nyt',
+  'the washington post', 'washingtonpost.com', 'washington post',
+  'the wall street journal', 'wsj', 'wsj.com', 'wall street journal',
+  'financial times', 'ft', 'ft.com',
+  'usa today',
+
+  // Broadcast / cable
+  'cnn', 'cnn.com',
+  'bbc', 'bbc news', 'bbc.com',
+  'nbc news', 'cbs news', 'abc news',
+  'fox news', 'fox business',
+  'msnbc', 'npr', 'pbs', 'pbs newshour',
+
+  // Politics / policy
+  'politico', 'axios', 'the hill',
+  'the atlantic', 'the new yorker',
+  'foreign affairs', 'foreign policy',
+  'the economist', 'economist.com',
+  'propublica',
+  'semafor',
+
+  // International mainstream
+  'the guardian', 'guardian.com',
+  'al jazeera', 'aljazeera', 'aljazeera.com',
+  'dw', 'deutsche welle',
+  'reuters india', 'the japan times', 'the times of india',
+
+  // Business / finance
+  'cnbc', 'cnbc.com',
+  'marketwatch',
+  'yahoo finance', 'yahoo!finance',
+  'business insider', 'businessinsider.com',
+  'barron\'s', 'barrons', 'barrons.com',
+  'investor\'s business daily', 'investors business daily',
+  'morningstar',
+
+  // Sports (Polymarket runs heavy sports markets)
+  'espn', 'espn.com',
+  'the athletic',
+  'sports illustrated',
+  'bleacher report',
+  'cbs sports', 'nbc sports', 'fox sports',
+
+  // Entertainment (when a market touches it)
+  'variety', 'the hollywood reporter', 'deadline',
+
+  // Crypto — keep this tight, avoid the long tail
+  'coindesk', 'cointelegraph', 'the block', 'decrypt',
+
+  // Tech (when relevant)
+  'techcrunch', 'the verge', 'wired', 'wired.com', 'ars technica',
+  'engadget',
+])
+
+// Google News titles render as "Headline - Publisher". Splitting on the
+// last " - " gives us the publisher; everything before is the headline.
+// Returns the cleaned title and the lowercased publisher (or '' if no
+// separator found, which we treat as untrusted).
+export function parseGoogleNewsTitle(rawTitle: string): { title: string; publisher: string } {
+  const t = rawTitle ?? ''
+  const idx = t.lastIndexOf(' - ')
+  if (idx === -1) return { title: t.trim(), publisher: '' }
+  return {
+    title: t.slice(0, idx).trim(),
+    publisher: t.slice(idx + 3).trim().toLowerCase(),
+  }
+}
+
+export function isTrustedPublisher(publisher: string): boolean {
+  if (!publisher) return false
+  return TRUSTED_GOOGLE_NEWS_PUBLISHERS.has(publisher.toLowerCase().trim())
+}
+
 // Targeted news fetch driven by the prediction-market relevance signal.
 // Reads top markets from the cached `market_topics` table (populated by
 // the markets refresh cron), then queries Google News for fresh articles
@@ -518,6 +607,9 @@ async function fetchOpenFdaEnforcement(source: SourceRecord, sourceUrl: URL): Pr
 //
 // Google News RSS supports `when:Nd` to limit to recent articles —
 // keeps each query small and recent. Free, no auth, ~10 markets per tick.
+//
+// Results are filtered against TRUSTED_GOOGLE_NEWS_PUBLISHERS so low-
+// trust publishers (Crypto Briefing, Rolling Out, etc.) don't ingest.
 async function fetchMarketDrivenNews(source: SourceRecord): Promise<NormalizedItem[]> {
   const TOP_N = 8
   const rows = sqlite.prepare<[number], { topic: string | null; volume_24h: number | null }>(
@@ -526,6 +618,7 @@ async function fetchMarketDrivenNews(source: SourceRecord): Promise<NormalizedIt
 
   const items: NormalizedItem[] = []
   const seenUrls = new Set<string>()
+  let skippedUntrusted = 0
 
   for (const row of rows) {
     if (!row.topic) continue
@@ -540,8 +633,14 @@ async function fetchMarketDrivenNews(source: SourceRecord): Promise<NormalizedIt
         if (!articleUrl || seenUrls.has(articleUrl)) continue
         seenUrls.add(articleUrl)
 
+        const { title, publisher } = parseGoogleNewsTitle(entry.title ?? '')
+        if (!isTrustedPublisher(publisher)) {
+          skippedUntrusted++
+          continue
+        }
+
         const item = toNormalizedItem(source, {
-          title: entry.title ?? '',
+          title,
           summary: entry.contentSnippet ?? entry.summary ?? entry.content ?? '',
           url: articleUrl,
           publishedAt: parseTimestamp(entry.isoDate ?? entry.pubDate ?? entry.updated),
@@ -552,6 +651,10 @@ async function fetchMarketDrivenNews(source: SourceRecord): Promise<NormalizedIt
       // Per-topic failure is non-fatal; other topics still ingest.
       console.warn(`[fetcher] markets/google-news topic="${row.topic}" failed: ${(err as Error).message}`)
     }
+  }
+
+  if (skippedUntrusted > 0) {
+    console.log(`[fetcher] markets/google-news: skipped ${skippedUntrusted} result(s) from untrusted publishers`)
   }
 
   return items
