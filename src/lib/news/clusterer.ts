@@ -37,6 +37,26 @@ function keywordOverlap(a: Set<string>, b: Set<string>): number {
   return count
 }
 
+// Window for merging a freshly-clustered batch into an existing recent cluster
+// within the same category. Without this, the same breaking story spawns a new
+// cluster every 5-min cron tick: cluster A's items get isProcessed=1, then a
+// fresh CNN copy of the same story ingests next tick and has no peers to
+// cluster with — so it forms a 1-item cluster of its own. 60 min matches the
+// window in which different outlets republish the same breaking event with
+// slightly different wordings; after that, follow-up developments are usually
+// genuinely new and deserve a fresh card.
+const RECENT_MERGE_WINDOW_MS = 60 * 60 * 1000
+const MERGE_KEYWORD_OVERLAP_THRESHOLD = 2
+
+// Pure helper for testing the merge eligibility check without a DB.
+export function shouldMergeIntoExisting(
+  candidateKeywords: Set<string>,
+  existingText: string,
+): boolean {
+  const existingKw = extractKeywords(existingText)
+  return keywordOverlap(candidateKeywords, existingKw) >= MERGE_KEYWORD_OVERLAP_THRESHOLD
+}
+
 export async function clusterNewItems(): Promise<number> {
   const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000
 
@@ -110,9 +130,77 @@ export async function clusterNewItems(): Promise<number> {
 
       const summaries = clusterItems.map(it => it.summary ?? '').filter(Boolean)
       const topics = extractTopics(canonical.title, summaries.join(' '))
-      const clusterId = crypto.randomUUID()
       const now = Date.now()
 
+      // Build the candidate cluster's keyword set from all its items, then check
+      // whether an existing recent cluster in the same category covers the same
+      // story. If so, merge in instead of creating a duplicate card.
+      const candidateKw = new Set<string>()
+      for (const it of clusterItems) {
+        for (const kw of extractKeywords(it.title + ' ' + (it.summary ?? ''))) {
+          candidateKw.add(kw)
+        }
+      }
+
+      const mergeCutoff = now - RECENT_MERGE_WINDOW_MS
+      const recentClusters = db.select()
+        .from(eventClusters)
+        .where(
+          and(
+            eq(eventClusters.category, category),
+            gt(eventClusters.firstSeenAt, mergeCutoff),
+          )
+        )
+        .all()
+
+      let mergedInto: typeof recentClusters[number] | null = null
+      for (const existing of recentClusters) {
+        let existingSummaries: string[] = []
+        try { existingSummaries = JSON.parse(existing.constituentSummaries ?? '[]') } catch { /* keep [] */ }
+        const existingText = existing.canonicalHeadline + ' ' + existingSummaries.join(' ')
+        if (shouldMergeIntoExisting(candidateKw, existingText)) {
+          mergedInto = existing
+          break
+        }
+      }
+
+      if (mergedInto) {
+        let existingIds: string[] = []
+        let existingSums: string[] = []
+        try { existingIds = JSON.parse(mergedInto.constituentItemIds ?? '[]') } catch { /* keep [] */ }
+        try { existingSums = JSON.parse(mergedInto.constituentSummaries ?? '[]') } catch { /* keep [] */ }
+
+        const mergedIds = [...existingIds, ...clusterItems.map(it => it.id)]
+        const mergedSums = [...existingSums, ...summaries]
+        const mergedScore = Math.max(mergedInto.relevanceScore ?? 0, maxScore)
+        const newCanonical = (mergedInto.relevanceScore ?? 0) >= maxScore
+          ? mergedInto.canonicalHeadline
+          : canonical.title
+
+        db.update(eventClusters)
+          .set({
+            canonicalHeadline: newCanonical,
+            relevanceScore: mergedScore,
+            sourceCount: mergedIds.length,
+            constituentItemIds: JSON.stringify(mergedIds),
+            constituentSummaries: JSON.stringify(mergedSums),
+            lastUpdatedAt: now,
+          })
+          .where(eq(eventClusters.id, mergedInto.id))
+          .run()
+
+        for (const item of clusterItems) {
+          db.update(newsItems)
+            .set({ isProcessed: 1, clusterId: mergedInto.id })
+            .where(eq(newsItems.id, item.id))
+            .run()
+        }
+
+        console.log(`[clusterer] merged ${clusterItems.length} item(s) into existing cluster ${mergedInto.id} (${category})`)
+        continue
+      }
+
+      const clusterId = crypto.randomUUID()
       try {
         db.insert(eventClusters).values({
           id: clusterId,
