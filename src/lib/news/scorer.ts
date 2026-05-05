@@ -159,12 +159,26 @@ function wordBoundaryMatch(text: string, kw: string): boolean {
   return re.test(text)
 }
 
+// Cap on the final score for stories that don't hit a single TIER1 keyword.
+// Without this, common-English TIER2 hits (guidance, recall, exploit, fired,
+// hired) compound with the markets-boost + recency + source-weight stack
+// and push niche stories (game reviews, food essays, Arctic op-eds) into the
+// 9-10 band. TIER1 covers the kind of news the bot exists for: Fed/FOMC
+// decisions, election results, indictments, military escalation, KEV catalog
+// entries, severe-weather warnings. If none of those match, the story doesn't
+// belong above 8.
+const NO_TIER1_SCORE_CAP = 8.0
+
 export function scoreItem(title: string, summary: string, weight: number, publishedAt: number): number {
   const text = (title + ' ' + (summary ?? '')).toLowerCase()
   let score = 0
+  let hasTier1Hit = false
 
   for (const kw of TIER1) {
-    if (wordBoundaryMatch(text, kw)) score += 4
+    if (wordBoundaryMatch(text, kw)) {
+      score += 4
+      hasTier1Hit = true
+    }
   }
   for (const kw of TIER2) {
     if (wordBoundaryMatch(text, kw)) score += 2
@@ -218,7 +232,8 @@ export function scoreItem(title: string, summary: string, weight: number, publis
     }
   }
 
-  return Math.min(10, Math.max(0, score))
+  const ceiling = hasTier1Hit ? 10 : NO_TIER1_SCORE_CAP
+  return Math.min(ceiling, Math.max(0, score))
 }
 
 export function detectRisk(text: string): { level: 'low' | 'medium' | 'high'; reasons: string[] } {

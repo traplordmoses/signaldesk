@@ -126,3 +126,52 @@ describe('scoreItem — LOCAL_CRIME penalty', () => {
     expect(score).toBeGreaterThanOrEqual(0)
   })
 })
+
+describe('scoreItem — TIER1 ceiling rule', () => {
+  const oldTs = Date.now() - 24 * 60 * 60 * 1000
+  const highWeight = 9
+  const freshTs = Date.now() - 30 * 60 * 1000  // 30 min ago — recency bonus active
+
+  it('caps at 8 when no TIER1 keyword is present, even with stacked bonuses', () => {
+    // 'earnings' (TIER2 +2), 'guidance' (TIER2 +2), 'recall' (TIER2 +2) = 6 base
+    // + source weight (+1) + recency (+1) + priority ticker if any (+1.5) = 9.5
+    // Without TIER1 hit, must cap at 8.
+    const score = scoreItem(
+      'Apple earnings guidance prompts product recall debate',
+      '',
+      highWeight,
+      freshTs
+    )
+    expect(score).toBeLessThanOrEqual(8)
+  })
+
+  it('allows full 10 when a TIER1 keyword is present', () => {
+    // 'fed rate' TIER1 (+4) + 'inflation' TIER2 (+2) + 'cpi report' TIER1 (+4) = 10
+    // + source weight + recency would push past 10, but cap keeps at 10.
+    const score = scoreItem(
+      'Fed rate decision next week as CPI report shows inflation rising',
+      '',
+      highWeight,
+      freshTs
+    )
+    expect(score).toBe(10)
+  })
+
+  it('niche game-review headline scores below 8 even with bonuses', () => {
+    // No TIER1 hit, no TIER2 hit either — just bonuses + maybe an 'exploit'
+    // TIER2 if the summary mentions it. Tests the inflation case.
+    const score = scoreItem(
+      'Atomfall game review: ten hours in, the dread sinks in',
+      'A guidance system for survivors helps you exploit weak points',
+      highWeight,
+      freshTs
+    )
+    expect(score).toBeLessThanOrEqual(8)
+  })
+
+  it('TIER2-only story with all bonuses still caps at 8', () => {
+    // Stack everything: TIER2 hit + priority ticker + recency + source weight.
+    const score = scoreItem('Apple earnings beat expectations', '', highWeight, freshTs)
+    expect(score).toBeLessThanOrEqual(8)
+  })
+})
