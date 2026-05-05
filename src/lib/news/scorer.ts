@@ -82,6 +82,7 @@ const TRAGEDY = [
   'shooting', 'bombing',
   'terror', 'terrorist',
   'hostage', 'massacre',
+  'murder', 'murdered',
 ]
 
 // HIGH_STAKES — show ⚠️ warning on the review card but still generate. These
