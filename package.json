@@ -6,6 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "pause": "node scripts/toggle-bot.mjs off",
+    "resume": "node scripts/toggle-bot.mjs on",
     "test": "vitest run",
     "test:watch": "vitest"
   },

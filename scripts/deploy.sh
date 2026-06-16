@@ -23,7 +23,9 @@
 
 set -euo pipefail
 
-PROJECT_DIR=/var/www/signaldesk
+# EC2 crawler-box convention: code under /opt (the crawler lives at
+# /opt/ec2_crawler). Install scripts/signaldesk.service to systemd first.
+PROJECT_DIR=/opt/signaldesk
 SERVICE=signaldesk
 ENV_FILE=/etc/signaldesk.env
 
