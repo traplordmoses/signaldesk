@@ -1,13 +1,17 @@
-import { larkPost, larkPatch } from './client'
+import { larkPost } from './client'
 import { db } from '@/lib/db'
 import { newsItems } from '@/lib/db/schema'
 import { inArray } from 'drizzle-orm'
 import type { EventCluster, GeneratedPost } from '@/types'
 
-// Lark Card Schema 2.0 — review cards use inline editable input so reviewers
-// can edit a draft directly in the group chat instead of via DM round-trip.
-// Schema 2.0 button clicks deliver to the Event Subscription URL (the
-// "card.action.trigger" callback subscription, not the legacy v1).
+// Lark Card Schema 2.0 — LINK MODE.
+//
+// Review cards are display-only plus one "Post on X" link button per draft.
+// The button is a pure `open_url` link into X's intent composer; it does NOT
+// fire a `card.action.trigger` callback, so the bot needs no inbound webhook /
+// Card Request URL. Lark's long connection carries events, not card callbacks,
+// and SignalDesk's Lark surface is now fully outbound. Rich management
+// (approve/reject/edit/history) lives in the dashboard, not the card.
 
 const MODE_BADGES: Record<string, string> = {
   pure_news:  '⚡ Breaking',
@@ -110,25 +114,11 @@ function plainText(content: string) {
   return { tag: 'plain_text', content }
 }
 
-function callbackButton(opts: {
-  text: string
-  type?: 'primary' | 'default' | 'danger'
-  action: string
-  postId?: string
-  formSubmit?: boolean
-}) {
-  const value: Record<string, string> = { action: opts.action }
-  if (opts.postId) value.postId = opts.postId
-  const button: Record<string, unknown> = {
-    tag: 'button',
-    text: plainText(opts.text),
-    type: opts.type ?? 'default',
-    behaviors: [{ type: 'callback', value }],
-  }
-  if (opts.formSubmit) button.form_action_type = 'submit'
-  return button
-}
-
+/**
+ * A pure-navigation button (`open_url`) — opens the URL in the reviewer's
+ * browser/app. It does NOT fire a `card.action.trigger` callback, so it needs
+ * no inbound endpoint. This is the only button type the card uses now.
+ */
 function urlButton(opts: { text: string; url: string; type?: 'primary' | 'default' }) {
   return {
     tag: 'button',
@@ -144,54 +134,28 @@ function urlButton(opts: { text: string; url: string; type?: 'primary' | 'defaul
   }
 }
 
-function twoColumnButtons(left: object, right: object) {
-  return {
-    tag: 'column_set',
-    flex_mode: 'none',
-    columns: [
-      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
-    ],
-  }
-}
-
-function threeColumnButtons(left: object, middle: object, right: object) {
-  return {
-    tag: 'column_set',
-    flex_mode: 'none',
-    columns: [
-      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [middle] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
-    ],
-  }
+/** X intent URL that pre-fills the composer with the tweet text. */
+export function buildXIntentUrl(text: string): string {
+  return 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(text)
 }
 
 // ====================== Cards ======================
 
 /**
- * Build the review card.
+ * Build the review card (link mode).
  *
- * Layout (intentionally minimal):
- *   - cluster headline + metadata
- *   - tweet quote
- *   - [Approve]  [Reject]
+ * Layout:
+ *   - cluster headline + metadata + risk
+ *   - per draft: mode badge + char count, the tweet quote, and a single
+ *     "🐦 Post on X" link button (open_url → X intent composer, pre-filled)
  *
- * No inline-edit affordance — final wording tweaks happen in the X
- * composer at the manual post step (which is the existing flow after
- * Approve → DM with intent link → human clicks Post on X). That step
- * is itself an edit surface, so duplicating it inside Lark added
- * complexity for a case that's already covered downstream.
- *
- * The `editingPostId` parameter is retained for the function signature
- * back-compat with handler.ts callers but is now unused — all posts
- * render the same minimal card shape.
+ * No Approve/Reject/Edit/Pause buttons — those were callbacks that needed an
+ * inbound endpoint. The reviewer reads a draft and clicks "Post on X" to open
+ * it pre-filled (the click is the approval); final wording tweaks happen in the
+ * X composer. To skip a draft, ignore it. Approve/reject/edit/history still
+ * live in the dashboard for anyone who wants the full surface.
  */
-export function buildReviewCard(
-  cluster: EventCluster,
-  posts: GeneratedPost[],
-  _opts: { editingPostId?: string } = {},
-): object {
+export function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): object {
   const elements: object[] = []
 
   const { names: sourceNames, earliest } = getClusterSources(cluster)
@@ -202,10 +166,6 @@ export function buildReviewCard(
   let topics: string[] = []
   try { topics = JSON.parse(cluster.topics ?? '[]') } catch { topics = [] }
 
-  // ── Header block — condensed metadata. Schema 2.0 doesn't support the
-  // `note` element (Lark API error 200861: "cards of schema V2 no longer
-  // support this capability; unsupported tag note"). Using markdown rows
-  // with italic / bold formatting for the same visual hierarchy.
   elements.push(md(`**${cluster.canonicalHeadline}**`))
 
   const sourceLine = sourceNames.length > 0 ? sourceNames.join(' · ') : 'Unknown source'
@@ -214,40 +174,33 @@ export function buildReviewCard(
   const allTags = [categoryLabel, ...topics.map(englishTag)]
   elements.push(md(`${allTags.join('  ·  ')}  ·  Score **${(cluster.relevanceScore ?? 0).toFixed(1)}**/10`))
 
-  // Risk warning — only when actually elevated
   if (cluster.riskLevel === 'high') {
-    elements.push(md('🚨 **HIGH RISK** — review carefully before approving'))
+    elements.push(md('🚨 **HIGH RISK** — read carefully before posting'))
   } else if (cluster.riskLevel === 'medium') {
-    elements.push(md('⚠️ Medium risk — double-check before approving'))
+    elements.push(md('⚠️ Medium risk — double-check before posting'))
   }
 
   for (const post of posts) {
     const badge = MODE_BADGES[post.contentMode] ?? post.contentMode
-    const isPureNews = post.contentMode === 'pure_news'
-    const displayContent = isPureNews
-      ? post.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
-      : post.content
+    // What the reviewer sees IS what posts — the quote and the X intent link
+    // use the same string, so there are no surprises at post time.
+    const content = post.content.trim()
 
     elements.push({ tag: 'hr' })
+    elements.push(md(`**${badge}**  ·  _${content.length}/280 chars_`))
 
-    // Mode badge + char count on one tight line
-    elements.push(md(`**${badge}**  ·  _${displayContent.length}/280 chars_`))
-
-    // Tweet quote — always visible so reviewer can read before deciding
-    const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
+    const quoted = content.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
 
-    // Two actions, side by side. The X composer at the manual post step
-    // is the edit surface for any wording tweaks.
-    elements.push(twoColumnButtons(
-      callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
-      callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
-    ))
+    elements.push(urlButton({ text: '🐦 Post on X', url: buildXIntentUrl(content), type: 'primary' }))
   }
 
-  // Pause bot at the bottom
   elements.push({ tag: 'hr' })
-  elements.push(callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' }))
+  elements.push(md(
+    '_Tap **Post on X** to open the composer pre-filled — edit the wording there ' +
+    'if needed, then post. Ignore a draft to skip it. Full approve/reject/edit ' +
+    'history lives in the dashboard._'
+  ))
 
   return {
     schema: '2.0',
@@ -260,6 +213,11 @@ export function buildReviewCard(
   }
 }
 
+/**
+ * Bot status card — posted to the review group when the bot is paused or
+ * resumed (via the dashboard or the `npm run pause` / `resume` host CLI).
+ * Display-only; there is no Pause/Resume button (that needed a callback).
+ */
 export function buildBotStatusCard(paused: boolean): object {
   return {
     schema: '2.0',
@@ -271,78 +229,14 @@ export function buildBotStatusCard(paused: boolean): object {
     body: {
       elements: [
         md(paused
-          ? 'SignalDesk bot is now **paused**. No new posts will be sent to this group until you resume.'
+          ? 'SignalDesk bot is now **paused**. No new posts will be sent to this group until it is resumed (dashboard, or `npm run resume` on the host).'
           : 'SignalDesk bot is now **active**. New high-scoring posts will be sent here automatically.'),
-        paused
-          ? callbackButton({ text: '▶️ Resume Bot', type: 'primary', action: 'resume_bot' })
-          : callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' }),
       ],
     },
   }
 }
 
-function buildApprovalCard(post: GeneratedPost): object {
-  const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText('✅ Post approved — ready to publish'),
-      template: 'green',
-    },
-    body: {
-      elements: [
-        md(displayContent),
-        urlButton({ text: '🐦 Open X to post', url: intentUrl, type: 'primary' }),
-      ],
-    },
-  }
-}
-
-function buildUpdatedCard(cluster: EventCluster, post: GeneratedPost, actorName: string, approved: boolean): object {
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText(cluster.canonicalHeadline),
-      template: approved ? 'green' : 'grey',
-    },
-    body: {
-      elements: [
-        md(approved ? `✅ **Approved** by ${actorName}` : `❌ **Rejected** by ${actorName}`),
-        md(displayContent),
-      ],
-    },
-  }
-}
-
-function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorName: string): object {
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText(cluster.canonicalHeadline),
-      template: 'blue',
-    },
-    body: {
-      elements: [
-        md(`✏️ **Edited** by ${actorName}`),
-        md(displayContent),
-        md(`_${post.content.length}/280 chars_`),
-        // After edit, offer Approve / Reject again so the reviewer can publish or kill in one click.
-        twoColumnButtons(
-          callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
-          callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
-        ),
-      ],
-    },
-  }
-}
-
-// ====================== Send / Update ======================
+// ====================== Send ======================
 
 export async function sendClusterToLark(cluster: EventCluster, posts: GeneratedPost[]): Promise<string | null> {
   const chatId = process.env.LARK_REVIEW_CHAT_ID
@@ -355,72 +249,6 @@ export async function sendClusterToLark(cluster: EventCluster, posts: GeneratedP
     content: JSON.stringify(card),
   })
   return (result.data as { message_id?: string } | undefined)?.message_id ?? null
-}
-
-export async function updateGroupCard(
-  messageId: string,
-  cluster: EventCluster,
-  post: GeneratedPost,
-  actorName: string,
-  approved: boolean,
-): Promise<void> {
-  const card = buildUpdatedCard(cluster, post, actorName, approved)
-  await larkPatch(`/im/v1/messages/${messageId}`, {
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-export async function updateGroupCardEdited(
-  messageId: string,
-  cluster: EventCluster,
-  post: GeneratedPost,
-  actorName: string,
-): Promise<void> {
-  const card = buildEditedGroupCard(cluster, post, actorName)
-  await larkPatch(`/im/v1/messages/${messageId}`, {
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-/**
- * Patch the review card to switch a post into edit mode (textbox visible) or
- * back to read-only mode. Used by the show_edit and cancel_edit callbacks.
- * Pass `editingPostId: undefined` to render the read-only version.
- */
-export async function updateReviewCardMode(
-  messageId: string,
-  cluster: EventCluster,
-  posts: GeneratedPost[],
-  editingPostId?: string,
-): Promise<void> {
-  const card = buildReviewCard(cluster, posts, { editingPostId })
-  await larkPatch(`/im/v1/messages/${messageId}`, {
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-export async function sendApprovalDM(openId: string, post: GeneratedPost): Promise<void> {
-  const card = buildApprovalCard(post)
-  await larkPost('/im/v1/messages?receive_id_type=open_id', {
-    receive_id: openId,
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
-}
-
-// Fallback for when sendApprovalDM fails (typically: reviewer has never opened
-// a chat with the bot, so Lark refuses receive_id_type=open_id). Posts the same
-// approval card as a threaded reply on the original review card so the action
-// stays visible right next to the cluster the reviewer just approved.
-export async function sendApprovalThreadReply(parentMessageId: string, post: GeneratedPost): Promise<void> {
-  const card = buildApprovalCard(post)
-  await larkPost(`/im/v1/messages/${parentMessageId}/reply`, {
-    msg_type: 'interactive',
-    content: JSON.stringify(card),
-  })
 }
 
 export async function sendBotStatusToGroup(paused: boolean): Promise<void> {

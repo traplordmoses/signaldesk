@@ -1,0 +1,30 @@
+[Unit]
+Description=SignalDesk (link mode, Next.js standalone)
+# Boots the cron scheduler (via Next instrumentation) which makes outbound
+# calls on startup, so wait for the network to actually be up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# EC2 crawler-box convention: code under /opt, env file under /etc with 0600.
+# Confirm the path + service user match the existing ec2_crawler setup.
+WorkingDirectory=/opt/signaldesk/.next/standalone
+EnvironmentFile=/etc/signaldesk.env
+# Bind to localhost only. The dashboard (/review, /settings) is NOT publicly
+# exposed on the EC2 box — reach it via SSH tunnel. The Lark surface is fully
+# outbound (cards out, X intent-links are the action), so nothing inbound from
+# the internet is needed.
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3000
+ExecStart=/usr/bin/node /opt/signaldesk/.next/standalone/server.js
+Restart=on-failure
+RestartSec=5
+# Give the SIGTERM handler in src/lib/cron/scheduler.ts time to checkpoint the
+# SQLite WAL and close the DB before systemd escalates to SIGKILL.
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

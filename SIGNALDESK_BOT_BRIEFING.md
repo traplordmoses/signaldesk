@@ -1,10 +1,17 @@
 # SignalDesk Bot Briefing
 
+> **Update — link mode (outbound-only).** This briefing predates the link-mode
+> conversion. The Lark review card no longer has Approve/Reject/Edit/Pause
+> callback buttons — each draft now carries a plain **"Post on X"** link (X
+> intent composer). The bot receives no Lark callbacks and runs no inbound
+> webhook; full approve/reject/edit management lives in the dashboard. See
+> `README.md` for the current flow.
+
 ## Reference Documents
 
 - Pre-deployment audit (`signaldesk-review.md`): `TODO: add link`
 - Phase 2 upgrade proposal (live Polymarket/Kalshi data integration): `UPGRADE_PROPOSAL.md` in repo root
-- Vitest regression suites: `src/app/api/lark/callback/route.test.ts`, `src/lib/news/scorer.test.ts`
+- Vitest regression suites: `src/lib/news/scorer.test.ts` (the Lark callback route and its test were removed in link mode)
 - Production deploy script: `scripts/deploy.sh`
 - One-time DB-path migration script: `scripts/migrate-db-path.sh`
 
