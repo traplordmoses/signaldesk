@@ -179,6 +179,19 @@ async function runAutoGenerate() {
         const posts = await generateSmartPosts(cluster)
         console.log(`[cron] generated ${posts.length} posts for: ${cluster.canonicalHeadline.slice(0, 50)}`)
 
+        // Legal Redline review (Probly Legal Agent integration). Off by default;
+        // when LEGAL_REVIEW_ENABLED=1, each draft gets a compliance verdict
+        // persisted to its row BEFORE the Lark card is built, so the reviewer
+        // sees it inline. Fail-open per post inside reviewClusterPosts.
+        if (process.env.LEGAL_REVIEW_ENABLED === '1') {
+          try {
+            const { reviewClusterPosts } = await import('@/lib/legal/review')
+            await reviewClusterPosts(cluster, posts)
+          } catch (e) {
+            console.error('[cron] legal review step failed (continuing):', (e as Error).message)
+          }
+        }
+
         if (
           config?.larkEnabled === 1 &&
           process.env.LARK_APP_ID &&

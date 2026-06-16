@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { newsItems } from '@/lib/db/schema'
 import { inArray } from 'drizzle-orm'
 import type { EventCluster, GeneratedPost } from '@/types'
+import { renderLegalBlock } from '@/lib/legal/card'
 
 // Lark Card Schema 2.0 — LINK MODE.
 //
@@ -191,6 +192,15 @@ export function buildReviewCard(cluster: EventCluster, posts: GeneratedPost[]): 
 
     const quoted = content.split('\n').map(l => `> ${l}`).join('\n')
     elements.push(md(quoted))
+
+    // Legal Redline verdict (only present when LEGAL_REVIEW_ENABLED and reviewed)
+    const legal = renderLegalBlock({
+      verdict: post.legalVerdict,
+      risk: post.legalRisk,
+      rationale: post.legalRationale,
+      redline: post.legalRedline,
+    })
+    if (legal) elements.push(md(legal))
 
     elements.push(urlButton({ text: '🐦 Post on X', url: buildXIntentUrl(content), type: 'primary' }))
   }
