@@ -1,19 +1,20 @@
 /**
  * Market relevance signal — orchestrates Polymarket + Kalshi ingestion and
- * exposes `relevanceBoost(headline)` for the news scorer.
+ * exposes `marketFit(headline)` for the news scorer.
  *
  * Refresh cycle: every 60 min the cron runs `refreshMarketTopics()` which
  *   1. fetches top markets/events from both platforms by 24h volume
  *   2. upserts them into `market_topics` (LLM extraction only on new rows)
  *   3. prunes rows we haven't seen in 30 days (markets that closed/resolved)
  *
- * relevanceBoost(headline) is called inline by `scoreItem` — it's a cheap
- * keyword match against the cached entities, no API or LLM call. Returns
- * a +0..3 bonus that's added to the existing 0-10 base score.
+ * marketFit(headline) is called inline by `scoreItem` — it's a cheap keyword
+ * match against the cached entities, no API or LLM call. It is the SPINE of
+ * the redesigned score: a flat +2 for mapping to ANY live market plus a
+ * volume-scaled bonus (0..+5 total), and it unlocks the 10 ceiling. By keying
+ * off what Polymarket / Kalshi are actively trading, the bot's coverage mirrors
+ * the live prediction-market universe by construction.
  *
- * The bonus magnitude is volume-weighted: matching a $50M-volume market
- * gets a bigger boost than matching a $5K-volume one. This skews the bot
- * toward generating tweets on stories the audience is actively watching.
+ * `relevanceBoost()` is kept as a thin numeric wrapper for back-compat.
  */
 
 import { db, sqlite } from '../db'
@@ -24,30 +25,41 @@ import { fetchTopKalshiEvents } from './kalshi'
 import { upsertMarketTopic } from './topics'
 
 const STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000  // 30 days
-const MAX_BOOST = 3.0
 const MIN_ENTITY_LEN = 3   // skip very short entities to avoid false matches
 
-// In-memory cache of trending topics keyed by entity → max-volume of any
-// market that contains that entity. Refreshed inline on each
-// `relevanceBoost()` call when the cache is older than CACHE_TTL_MS, so
-// scorer changes propagate without waiting for the cron tick.
-let entityCache: Map<string, number> | null = null
+// MarketFit shape: a flat reward for mapping to ANY live market, plus a
+// volume-scaled bonus. A story tied to an actively-traded market is the
+// strongest "we should post this" signal there is, so this dominates the score.
+const MATCH_BONUS = 2.0        // any live-market match
+const MAX_VOLUME_BONUS = 3.0   // additional, scaled by 24h volume
+export const MAX_BOOST = 5.0   // MATCH_BONUS + MAX_VOLUME_BONUS
+
+// In-memory cache of trending topics keyed by entity → the max-volume market
+// that contains that entity (volume + its category). Refreshed inline on each
+// `marketFit()` call when the cache is older than CACHE_TTL_MS, so scorer
+// changes propagate without waiting for the cron tick.
+interface CachedEntity {
+  volume: number
+  category: string | null
+}
+let entityCache: Map<string, CachedEntity> | null = null
 let cacheBuiltAt = 0
 const CACHE_TTL_MS = 5 * 60 * 1000  // 5 min
 
 interface CachedTopicRow {
   entities: string | null
   volume_24h: number | null
+  category: string | null
 }
 
-function buildEntityCache(): Map<string, number> {
+function buildEntityCache(): Map<string, CachedEntity> {
   // Read all currently-tracked market topics. Limited by the 30-day prune
   // so the cache stays bounded.
   const rows = sqlite.prepare<[], CachedTopicRow>(
-    'SELECT entities, volume_24h FROM market_topics'
+    'SELECT entities, volume_24h, category FROM market_topics'
   ).all()
 
-  const cache = new Map<string, number>()
+  const cache = new Map<string, CachedEntity>()
   for (const row of rows) {
     if (!row.entities) continue
     let entities: string[]
@@ -59,14 +71,14 @@ function buildEntityCache(): Map<string, number> {
     for (const ent of entities) {
       const key = ent.toLowerCase().trim()
       if (key.length < MIN_ENTITY_LEN) continue
-      const prev = cache.get(key) ?? 0
-      if (vol > prev) cache.set(key, vol)
+      const prev = cache.get(key)
+      if (!prev || vol > prev.volume) cache.set(key, { volume: vol, category: row.category ?? null })
     }
   }
   return cache
 }
 
-function getEntityCache(): Map<string, number> {
+function getEntityCache(): Map<string, CachedEntity> {
   const now = Date.now()
   if (!entityCache || now - cacheBuiltAt > CACHE_TTL_MS) {
     entityCache = buildEntityCache()
@@ -75,39 +87,71 @@ function getEntityCache(): Map<string, number> {
   return entityCache
 }
 
+// Word-boundary entity matching. As the score's spine, marketFit must not fire
+// on substrings: a 3-char entity like "eth" via `includes()` matches "Seth",
+// "method", "ethics" — false market hits that would wrongly unlock the ceiling.
+const ENTITY_RE_CACHE = new Map<string, RegExp>()
+function entityMatch(haystack: string, entity: string): boolean {
+  let re = ENTITY_RE_CACHE.get(entity)
+  if (!re) {
+    re = new RegExp(`(?:^|\\W)${entity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:$|\\W)`, 'i')
+    ENTITY_RE_CACHE.set(entity, re)
+  }
+  return re.test(haystack)
+}
+
+export interface MarketFit {
+  boost: number           // 0..MAX_BOOST contribution to the news score
+  matched: boolean        // did the headline map to any live market?
+  maxVolume: number       // 24h volume of the strongest matched market
+  category: string | null // that market's category (economics|politics|crypto|sports|culture|science|other)
+}
+
 /**
- * Returns a +0..3 score boost based on how strongly a news headline maps to
- * currently-active prediction-market entities.
+ * The market-fit spine. Returns how strongly a news headline maps to a
+ * currently-active prediction market, plus the matched market's volume and
+ * category (used for the ceiling rule and, later, prompt framing).
  *
  * Scoring shape:
  *   - For each entity in the cache, check if it appears in the headline (lc).
- *   - If multiple matches, take the MAX volume (not sum) — big markets
- *     dominate, but matching two small markets shouldn't compound past one
- *     big one.
- *   - Map matched volume to a boost on a log scale, capped at MAX_BOOST.
+ *   - Take the MAX-volume match (not sum) — big markets dominate, but matching
+ *     two small markets shouldn't compound past one big one.
+ *   - boost = flat MATCH_BONUS for ANY match + a volume-scaled bonus:
+ *       $10K→+0.5  $100K→+1.0  $1M→+1.5  $10M→+2.0  $100M→+2.5  $1B→+3.0(cap)
  *
- * Returns 0 when nothing matches OR when the cache is empty (no markets
- * fetched yet — first cron tick hasn't run).
+ * Returns a no-match result when nothing matches OR the cache is empty (no
+ * markets fetched yet — first cron tick hasn't run).
  */
-export function relevanceBoost(headline: string, summary: string = ''): number {
+export function marketFit(headline: string, summary: string = ''): MarketFit {
+  const none: MarketFit = { boost: 0, matched: false, maxVolume: 0, category: null }
+
   const cache = getEntityCache()
-  if (cache.size === 0) return 0
+  if (cache.size === 0) return none
 
   const haystack = `${headline} ${summary}`.toLowerCase()
   let maxVolume = 0
+  let category: string | null = null
 
-  for (const [entity, vol] of cache) {
-    if (haystack.includes(entity)) {
-      if (vol > maxVolume) maxVolume = vol
+  for (const [entity, info] of cache) {
+    if (info.volume > maxVolume && entityMatch(haystack, entity)) {
+      maxVolume = info.volume
+      category = info.category
     }
   }
 
-  if (maxVolume <= 0) return 0
+  if (maxVolume <= 0) return none
 
-  // Log-scale: $1K = 0.5, $10K = 1.0, $100K = 1.5, $1M = 2.0, $10M = 2.5,
-  // $100M+ = 3.0. Caps at MAX_BOOST.
-  const boost = 0.5 * Math.log10(maxVolume)
-  return Math.min(MAX_BOOST, Math.max(0, boost))
+  const volumeBonus = Math.min(MAX_VOLUME_BONUS, Math.max(0, 0.5 * (Math.log10(maxVolume) - 3)))
+  const boost = Math.min(MAX_BOOST, MATCH_BONUS + volumeBonus)
+  return { boost, matched: true, maxVolume, category }
+}
+
+/**
+ * Back-compat numeric wrapper — returns just the marketFit boost. Retained for
+ * any caller that wants the bare 0..MAX_BOOST number.
+ */
+export function relevanceBoost(headline: string, summary: string = ''): number {
+  return marketFit(headline, summary).boost
 }
 
 /**

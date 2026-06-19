@@ -1,10 +1,24 @@
 /**
- * Coverage for the risk classifier — locks in the TRAGEDY (auto-skip) vs
- * HIGH_STAKES (warn-only) split. Critical because a regression here either
- * lets the bot auto-tweet during active tragedies, or auto-skips legitimate
- * breaking-news the bot is built to cover.
+ * Coverage for the redesigned scorer + the risk classifier.
+ *
+ * Two contracts are locked in here:
+ *  1. detectRisk — the TRAGEDY (auto-skip) vs HIGH_STAKES (warn-only) split.
+ *     A regression either lets the bot auto-tweet during active tragedies, or
+ *     auto-skips legitimate breaking-news the bot is built to cover.
+ *  2. scoreItem — the optimism-weighted, Polymarket-category model: marquee +
+ *     positive stories rise, gore/doom is penalised into the floor, and the
+ *     geopolitics TOPIC survives while gore FRAMING does not.
+ *
+ * The market-fit signal is the spine of the real score but depends on the live
+ * market_topics cache, so it's exercised end-to-end in scripts/backtest-scoring.ts.
+ * Here we point the lazy-loaded DB at a throwaway temp file so market-fit is a
+ * hermetic 0 and these assertions test the deterministic keyword/valence/ceiling
+ * logic in isolation.
  */
 import { describe, it, expect } from 'vitest'
+import os from 'node:os'
+import path from 'node:path'
+process.env.DB_PATH = path.join(os.tmpdir(), 'signaldesk-scorer-test.db')
 import { detectRisk, scoreItem } from './scorer'
 
 describe('detectRisk', () => {
@@ -86,6 +100,76 @@ describe('detectRisk', () => {
   })
 })
 
+describe('scoreItem — optimism-weighted model', () => {
+  const oldTs = Date.now() - 24 * 60 * 60 * 1000   // 24h ago — no recency bonus
+  const freshTs = Date.now() - 30 * 60 * 1000       // 30 min ago — recency active
+  const lowWeight = 5   // no source-weight bonus
+  const midWeight = 7   // +0.5 source
+  const highWeight = 9  // +1.0 source
+
+  describe('marquee + positive stories rise', () => {
+    it('a marquee story with a full bonus stack clears the old 8 cap', () => {
+      // crypto (marquee, +3) + anticipation (+2) + positive (+2) + ticker (+1.5)
+      // + source (+1) + recency (+0.5) = 10. The marquee ceiling lets it exceed 8.
+      const score = scoreItem('Bitcoin set to hit a record all-time high this week', '', highWeight, freshTs)
+      expect(score).toBeGreaterThan(8)
+    })
+
+    it('rewards forward-looking "before it happens" framing', () => {
+      const withAnticipation = scoreItem('Ethereum set to hit a record high this week', '', lowWeight, oldTs)
+      const without = scoreItem('Ethereum at a record high', '', lowWeight, oldTs)
+      expect(withAnticipation).toBeGreaterThan(without)
+    })
+
+    it('rewards optimism over doom on the same marquee topic', () => {
+      const upbeat = scoreItem('Bitcoin surges to a record high', '', lowWeight, oldTs)
+      const doom = scoreItem('Bitcoin crashes as crypto market plunges', '', lowWeight, oldTs)
+      expect(upbeat).toBeGreaterThan(doom)
+      expect(doom).toBeLessThan(4)
+    })
+
+    it('does not penalise "killed" hiding inside another word (skilled)', () => {
+      const score = scoreItem('Highly skilled striker wins the championship', '', lowWeight, oldTs)
+      expect(score).toBeGreaterThanOrEqual(3)
+    })
+  })
+
+  describe('the marquee/market ceiling rule', () => {
+    it('caps a non-marquee, no-market story at 8 even with a full bonus stack', () => {
+      // economy (non-marquee, +2) + anticipation (+2) + positive (+2)
+      // + ticker (+1.5) + source (+1) + recency (+0.5) = 9 → capped at 8.
+      const score = scoreItem(
+        'Goldman Sachs set to post record earnings beats ahead of Fed decision this week',
+        '',
+        highWeight,
+        freshTs,
+      )
+      expect(score).toBe(8)
+    })
+  })
+
+  describe('gore is floored, but the geopolitics topic survives', () => {
+    it('docks gore framing to the floor', () => {
+      const score = scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs)
+      expect(score).toBe(0)
+      expect(detectRisk('40 killed as Russia shells Ukraine city').level).toBe('high')
+    })
+
+    it('keeps a neutral / de-escalation geopolitics market well above its gore version', () => {
+      const deescalation = scoreItem('Russia and Ukraine agree ceasefire deal', '', midWeight, oldTs)
+      const gore = scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs)
+      expect(deescalation).toBeGreaterThan(3)
+      expect(deescalation).toBeGreaterThan(gore)
+    })
+
+    it('floors a doom headline that used to top the old ranking', () => {
+      // Real old #1 (scored 8.5 under the previous model).
+      const score = scoreItem('Lebanon accuses Israel of committing ‘ecocide’ in country since 2023', '', lowWeight, oldTs)
+      expect(score).toBeLessThan(2)
+    })
+  })
+})
+
 describe('scoreItem — LOCAL_CRIME penalty', () => {
   // Use an old publishedAt to zero out the recency bonus and isolate the penalty.
   const oldTs = Date.now() - 24 * 60 * 60 * 1000  // 24h ago
@@ -93,7 +177,7 @@ describe('scoreItem — LOCAL_CRIME penalty', () => {
 
   it('docks the score on a Hong Kong burglary headline', () => {
     const score = scoreItem('Hong Kong police bust burglary ring in Kowloon', '', lowWeight, oldTs)
-    expect(score).toBe(0)  // 0 base - 3 penalty floors at 0
+    expect(score).toBe(0)  // no category/market + 3 penalty floors at 0
   })
 
   it('docks the score on a routine drug bust', () => {
@@ -101,77 +185,25 @@ describe('scoreItem — LOCAL_CRIME penalty', () => {
     expect(score).toBe(0)
   })
 
-  it('does not dock legitimate trafficking-policy stories that only mention cocaine/heroin in passing', () => {
-    // 'cocaine' alone is intentionally NOT in LOCAL_CRIME — only 'cocaine bust'
-    // / 'cocaine seizure' is. A trafficking-policy story with a TIER1 hit
-    // ('indicted') should retain its full score.
+  it('does not boost a legal-doom headline with no market or marquee category', () => {
+    // 'indicted' is no longer a scoring keyword — the bot doesn't chase legal
+    // doom. With no live market or marquee category, this scores at the floor.
     const score = scoreItem('Cartel leader indicted on cocaine trafficking charges', '', lowWeight, oldTs)
-    expect(score).toBe(4)  // TIER1 'indicted' (+4), no penalty
+    expect(score).toBe(0)
   })
 
-  it('does dock when both TIER1 and LOCAL_CRIME hit (penalty stacks correctly)', () => {
-    // 'indicted' (+4) + 'cocaine bust' LOCAL_CRIME (-3) = 1
+  it('stacks the local-crime + soft-negative penalties', () => {
     const score = scoreItem('Local police indicted in cocaine bust scandal', '', lowWeight, oldTs)
-    expect(score).toBe(1)
+    expect(score).toBe(0)
   })
 
   it('does not double-penalize multiple LOCAL_CRIME hits in one headline', () => {
-    // "burglary" + "vandalism" both in LOCAL_CRIME — penalty caps at one
     const score = scoreItem('Wave of burglary and vandalism reports across district', '', lowWeight, oldTs)
-    expect(score).toBe(0)  // 0 base - 3 penalty (one match), floored at 0
+    expect(score).toBe(0)
   })
 
   it('floors at 0 instead of going negative', () => {
     const score = scoreItem('Burglary suspect arrested', '', lowWeight, oldTs)
     expect(score).toBeGreaterThanOrEqual(0)
-  })
-})
-
-describe('scoreItem — TIER1 ceiling rule', () => {
-  const oldTs = Date.now() - 24 * 60 * 60 * 1000
-  const highWeight = 9
-  const freshTs = Date.now() - 30 * 60 * 1000  // 30 min ago — recency bonus active
-
-  it('caps at 8 when no TIER1 keyword is present, even with stacked bonuses', () => {
-    // 'earnings' (TIER2 +2), 'guidance' (TIER2 +2), 'recall' (TIER2 +2) = 6 base
-    // + source weight (+1) + recency (+1) + priority ticker if any (+1.5) = 9.5
-    // Without TIER1 hit, must cap at 8.
-    const score = scoreItem(
-      'Apple earnings guidance prompts product recall debate',
-      '',
-      highWeight,
-      freshTs
-    )
-    expect(score).toBeLessThanOrEqual(8)
-  })
-
-  it('allows full 10 when a TIER1 keyword is present', () => {
-    // 'fed rate' TIER1 (+4) + 'inflation' TIER2 (+2) + 'cpi report' TIER1 (+4) = 10
-    // + source weight + recency would push past 10, but cap keeps at 10.
-    const score = scoreItem(
-      'Fed rate decision next week as CPI report shows inflation rising',
-      '',
-      highWeight,
-      freshTs
-    )
-    expect(score).toBe(10)
-  })
-
-  it('niche game-review headline scores below 8 even with bonuses', () => {
-    // No TIER1 hit, no TIER2 hit either — just bonuses + maybe an 'exploit'
-    // TIER2 if the summary mentions it. Tests the inflation case.
-    const score = scoreItem(
-      'Atomfall game review: ten hours in, the dread sinks in',
-      'A guidance system for survivors helps you exploit weak points',
-      highWeight,
-      freshTs
-    )
-    expect(score).toBeLessThanOrEqual(8)
-  })
-
-  it('TIER2-only story with all bonuses still caps at 8', () => {
-    // Stack everything: TIER2 hit + priority ticker + recency + source weight.
-    const score = scoreItem('Apple earnings beat expectations', '', highWeight, freshTs)
-    expect(score).toBeLessThanOrEqual(8)
   })
 })
