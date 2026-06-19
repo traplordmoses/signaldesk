@@ -166,14 +166,17 @@ Relevance score: ${(cluster.relevanceScore ?? 0).toFixed(1)}/10
 
 Headline: ${safeHeadline}
 Context/Summary: ${summaryText || '(no additional context)'}
-Market URL (use ONLY for news_odds and engagement modes, NOT for pure_news): ${marketUrl}
+Market (reviewer metadata — NEVER put a URL in the tweet): ${marketUrl}
 
 ${modeInstruction}
 
 Remember:
-- pure_news: NO market URL in the content. Just the breaking fact.
-- news_odds: include real probability movement if context has it, else describe direction. Market URL on last line.
-- engagement: 3-5 sentences of context + trajectory + what's at stake + who wins/loses, then one sharp forced-choice question. Market URL on last line. AIM FOR 280-320 characters — longer is better here.
+- Lead with anticipation, not a news alert. No "BREAKING:" / "JUST IN:" out of habit — frame the outcome that's still up for grabs.
+- Never write casualties or gore. For conflict stories, frame the open question neutrally and lean to the de-escalation angle.
+- Tasteful emoji ok (0–2). Never name Polymarket or Kalshi ("Probly" is fine). No URLs — a human adds the link.
+- pure_news (THE DROP): 1–2 punchy, forward-looking lines, optional hook.
+- news_odds (THE LINE): the development + the prediction, qualitative direction only (never invent a %).
+- engagement (THE ARC): 3–5 sentences of arc, then one sharp, fun, take-a-side question. ~280–320 characters.
 
 Now write one post.`
 
@@ -343,9 +346,9 @@ export async function generateSmartPosts(cluster: Cluster) {
   }
 
   // Auto-generation is locked to a single pure_news post per cluster.
-  // The team's content strategy is "BREAKING / JUST IN" news summaries with no
-  // platform names, no probabilities, no forced-choice questions. The other
-  // modes (news_odds, engagement) remain available via the manual
+  // pure_news = "THE DROP": a crisp, forward-looking, optimistic take on what's
+  // in play — the Probly house voice (see prompts.ts). The richer modes
+  // (news_odds, engagement) remain available via the manual
   // /api/posts/generate endpoint with an explicit mode override, but the
   // 15-min auto-generate cron always emits pure_news.
   const posts: (typeof generatedPosts.$inferSelect)[] = []

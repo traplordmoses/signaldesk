@@ -49,5 +49,18 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_market_topics_volume   ON market_topics(volume_24h);
 `)
 
+// Additive columns for the Legal Redline review integration (see
+// LEGAL_REDLINE_INTEGRATION.md). Idempotent — the ALTER throws once the column
+// exists, which we ignore. Lets the feature land without a RUN_MIGRATIONS step.
+for (const stmt of [
+  'ALTER TABLE generated_posts ADD COLUMN legal_verdict TEXT',
+  'ALTER TABLE generated_posts ADD COLUMN legal_risk TEXT',
+  'ALTER TABLE generated_posts ADD COLUMN legal_redline TEXT',
+  'ALTER TABLE generated_posts ADD COLUMN legal_rationale TEXT',
+  'ALTER TABLE generated_posts ADD COLUMN legal_reviewed_at INTEGER',
+]) {
+  try { sqlite.exec(stmt) } catch { /* column already exists — fine */ }
+}
+
 export const db = drizzle(sqlite, { schema })
 export { sqlite }

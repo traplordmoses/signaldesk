@@ -167,7 +167,24 @@ async function runAutoGenerate() {
     // interval this paces delivery at ~1 card every 2-3 minutes instead of
     // batches landing all at once.
     const PER_CYCLE_CAP = 2
-    const trimmed = candidates.slice(0, PER_CYCLE_CAP)
+    // Editorial diversity: don't draft two same-category cards in one cycle.
+    // Walk the score-sorted candidates picking the first of each unseen
+    // category, so a crypto-heavy backlog doesn't post two crypto cards
+    // back-to-back. Then top up by raw rank if diversity left us short (e.g.
+    // every candidate is the same category). (Cross-cycle rotation — "don't
+    // post crypto twice in a row across ticks" — is a future add.)
+    const trimmed: typeof candidates = []
+    const usedCategories = new Set<string>()
+    for (const c of candidates) {
+      if (trimmed.length >= PER_CYCLE_CAP) break
+      if (usedCategories.has(c.category)) continue
+      trimmed.push(c)
+      usedCategories.add(c.category)
+    }
+    for (const c of candidates) {
+      if (trimmed.length >= PER_CYCLE_CAP) break
+      if (!trimmed.includes(c)) trimmed.push(c)
+    }
     const deferred = candidates.length - trimmed.length
 
     console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}${deferred > 0 ? ` — generating top ${trimmed.length}, deferring ${deferred} to next cycle` : ''}`)
@@ -178,6 +195,19 @@ async function runAutoGenerate() {
       try {
         const posts = await generateSmartPosts(cluster)
         console.log(`[cron] generated ${posts.length} posts for: ${cluster.canonicalHeadline.slice(0, 50)}`)
+
+        // Legal Redline review (Probly Legal Agent integration). Off by default;
+        // when LEGAL_REVIEW_ENABLED=1, each draft gets a compliance verdict
+        // persisted to its row BEFORE the Lark card is built, so the reviewer
+        // sees it inline. Fail-open per post inside reviewClusterPosts.
+        if (process.env.LEGAL_REVIEW_ENABLED === '1') {
+          try {
+            const { reviewClusterPosts } = await import('@/lib/legal/review')
+            await reviewClusterPosts(cluster, posts)
+          } catch (e) {
+            console.error('[cron] legal review step failed (continuing):', (e as Error).message)
+          }
+        }
 
         if (
           config?.larkEnabled === 1 &&

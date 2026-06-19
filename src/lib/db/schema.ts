@@ -62,6 +62,12 @@ export const generatedPosts = sqliteTable('generated_posts', {
   reviewedBy: text('reviewed_by'),
   larkMessageId: text('lark_message_id'),
   larkSentAt: integer('lark_sent_at'),
+  // Legal Redline review (Probly Legal Agent integration) — additive, nullable.
+  legalVerdict: text('legal_verdict'),
+  legalRisk: text('legal_risk'),
+  legalRedline: text('legal_redline'),
+  legalRationale: text('legal_rationale'),
+  legalReviewedAt: integer('legal_reviewed_at'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })

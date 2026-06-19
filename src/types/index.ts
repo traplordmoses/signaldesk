@@ -62,6 +62,13 @@ export interface GeneratedPost {
   larkSentAt: number | null
   createdAt: number
   updatedAt: number
+  // Legal Redline review (Probly Legal Agent integration). Null until reviewed,
+  // and whenever LEGAL_REVIEW_ENABLED is off. See LEGAL_REDLINE_INTEGRATION.md.
+  legalVerdict?: string | null
+  legalRisk?: string | null
+  legalRedline?: string | null
+  legalRationale?: string | null
+  legalReviewedAt?: number | null
 }
 
 export interface Settings {
