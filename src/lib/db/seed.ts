@@ -1,5 +1,6 @@
 import { db } from './index'
 import { newsSources, settings } from './schema'
+import { inArray } from 'drizzle-orm'
 
 export const DEFAULT_NEWS_SOURCES = [
   { id: 'reuters_world',    name: 'Reuters World',    url: 'https://feeds.reuters.com/Reuters/worldNews',            category: 'politics',  weight: 10 },
@@ -23,7 +24,10 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'ap_politics',      name: 'AP Politics',      url: 'https://feeds.apnews.com/rss/apf-politics',              category: 'politics',  weight: 10 },
   { id: 'politico',         name: 'Politico',         url: 'https://www.politico.com/rss/politicopicks.xml',         category: 'politics',  weight: 9  },
   { id: 'the_hill',         name: 'The Hill',         url: 'https://thehill.com/feed/',                              category: 'politics',  weight: 8  },
-  { id: 'aljazeera',        name: 'Al Jazeera',       url: 'https://www.aljazeera.com/xml/rss/all.xml',              category: 'politics',  weight: 9  },
+  // Al Jazeera down-weighted (10→7): a conflict-heavy wire whose front page skews
+  // hard to war/geopolitics. Still on for coverage, but no longer earns the
+  // full source-weight bonus that helped push conflict stories up the old ranking.
+  { id: 'aljazeera',        name: 'Al Jazeera',       url: 'https://www.aljazeera.com/xml/rss/all.xml',              category: 'politics',  weight: 7  },
   { id: 'bbc_world',        name: 'BBC World News',   url: 'https://feeds.bbci.co.uk/news/world/rss.xml',            category: 'politics',  weight: 9  },
   { id: 'axios',            name: 'Axios',            url: 'https://api.axios.com/feed/',                            category: 'politics',  weight: 9  },
   { id: 'the_block',        name: 'The Block',        url: 'https://www.theblock.co/rss.xml',                        category: 'crypto',    weight: 9  },
@@ -32,7 +36,7 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'axios_markets',    name: 'Axios Markets',    url: 'https://api.axios.com/feed/markets',                     category: 'economics', weight: 8  },
   { id: 'wired',            name: 'Wired',            url: 'https://www.wired.com/feed/rss',                         category: 'tech',      weight: 7  },
 
-  // Primary-source and breaking-data feeds
+  // Primary-source feeds (Fed = forward-looking, decidable macro events — on-brand)
   { id: 'fed_press_all',     name: 'Federal Reserve Press Releases', url: 'https://www.federalreserve.gov/feeds/press_all.xml',      category: 'economics', weight: 10 },
   { id: 'fed_monetary',      name: 'Federal Reserve Monetary Policy', url: 'https://www.federalreserve.gov/feeds/press_monetary.xml', category: 'economics', weight: 10 },
   { id: 'fed_speeches',      name: 'Federal Reserve Speeches',        url: 'https://www.federalreserve.gov/feeds/speeches.xml',       category: 'economics', weight: 9  },
@@ -47,24 +51,25 @@ export const DEFAULT_NEWS_SOURCES = [
   //
   // prnewswire_all intentionally removed for the same reason — same noise
   // shape as 8-Ks: the daily flood of corporate quarterly earnings press
-  // releases ("Acme Corp announces Q1 2026 earnings", "Forum Markets
-  // announces earnings call date", "BRC Group Holdings Q1 2026 earnings
-  // call") drove low-signal cards and hallucinated analyst-style second
+  // releases drove low-signal cards and hallucinated analyst-style second
   // sentences. Real M&A / executive-departure / regulatory-action news
   // arrives via Reuters, AP, FT, Bloomberg etc. anyway.
-  { id: 'cisa_kev',          name: 'CISA Known Exploited Vulnerabilities', url: 'signaldesk://cisa/kev',                              category: 'cyber',     weight: 9  },
-  { id: 'nws_severe_alerts', name: 'National Weather Service Severe Alerts', url: 'signaldesk://nws/severe-alerts',                   category: 'weather',   weight: 8  },
-  { id: 'usgs_quakes_sig',   name: 'USGS Significant Earthquakes',    url: 'signaldesk://usgs/significant-quakes',                   category: 'weather',   weight: 8  },
-  { id: 'openfda_drug_recalls', name: 'openFDA Drug Recalls',         url: 'signaldesk://openfda/enforcement?kind=drug',              category: 'health',    weight: 8  },
-  { id: 'openfda_device_recalls', name: 'openFDA Device Recalls',     url: 'signaldesk://openfda/enforcement?kind=device',            category: 'health',    weight: 8  },
-  { id: 'openfda_food_recalls', name: 'openFDA Food Recalls',         url: 'signaldesk://openfda/enforcement?kind=food',              category: 'health',    weight: 8  },
+  //
+  // ── Retired "doom" ingestion adapters ──────────────────────────────────────
+  // The CISA exploited-vulnerabilities, NWS severe-weather-alerts, USGS
+  // significant-earthquakes, and openFDA drug/device/food recall adapters used
+  // to seed here. They produce pure-negative signal that doesn't fit Probly's
+  // optimistic, market-driven feed, so they've been removed from the default set
+  // and are force-disabled on existing DBs (see RETIRED_SOURCE_IDS below). The
+  // adapter code still lives in fetcher.ts — re-enabling is just re-adding a row.
+  // Disaster stories with a genuinely active market still arrive via the
+  // markets-driven Google News pull below.
 
   // Markets-driven news pull — uses the cached prediction-market topics
   // (Polymarket + Kalshi) to query Google News for recent articles on each
-  // top-volume market's topic. Surfaces stories the RSS firehose might miss,
-  // particularly niche-ticker / region-specific events that have active
-  // markets but limited mainstream wire coverage.
-  { id: 'markets_news_pull',  name: 'Markets Top-Topic News',          url: 'signaldesk://markets/google-news',                       category: 'economics', weight: 8  },
+  // top-volume market's topic. This is the MOST on-brand source: it surfaces
+  // exactly the stories with live markets, so it's weighted at the top (8→10).
+  { id: 'markets_news_pull',  name: 'Markets Top-Topic News',          url: 'signaldesk://markets/google-news',                       category: 'economics', weight: 10 },
 
   // International + wire fallbacks (AP via feedx mirrors faster than Google News wrap)
   { id: 'feedx_ap',          name: 'AP via feedx',     url: 'https://feedx.net/rss/ap.xml',                          category: 'politics',  weight: 10 },
@@ -81,19 +86,21 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'whitehouse_actions',name: 'White House Presidential Actions', url: 'https://www.whitehouse.gov/presidential-actions/feed/', category: 'politics', weight: 10 },
   { id: 'congress_bills',    name: 'Congress.gov Most-Viewed Bills',   url: 'https://www.congress.gov/rss/most-viewed-bills.xml',    category: 'politics', weight: 8  },
 
-  // Defense
-  { id: 'breaking_defense',  name: 'Breaking Defense', url: 'https://breakingdefense.com/feed/',                     category: 'politics',  weight: 8  },
+  // Defense — down-weighted (8→6): conflict-skewed; keep for coverage, drop the bonus.
+  { id: 'breaking_defense',  name: 'Breaking Defense', url: 'https://breakingdefense.com/feed/',                     category: 'politics',  weight: 6  },
 
-  // Tech / cyber blogs (CISA KEV above is the official channel; these are faster-moving)
-  { id: 'four04_media',      name: '404 Media',        url: 'https://www.404media.co/rss/',                          category: 'tech',      weight: 8  },
-  { id: 'the_hacker_news',   name: 'The Hacker News',  url: 'https://feeds.feedburner.com/TheHackersNews',           category: 'cyber',     weight: 8  },
-  { id: 'bleepingcomputer',  name: 'BleepingComputer', url: 'https://www.bleepingcomputer.com/feed/',                category: 'cyber',     weight: 9  },
-  { id: 'krebs_security',    name: 'Krebs on Security',url: 'https://krebsonsecurity.com/feed/',                     category: 'cyber',     weight: 9  },
+  // Tech / cyber blogs — down-weighted (breach/exploit doom rarely maps to a
+  // Probly market). Kept active for the occasional big story, but below the
+  // source-weight bonus threshold so they don't get nudged up the ranking.
+  { id: 'four04_media',      name: '404 Media',        url: 'https://www.404media.co/rss/',                          category: 'tech',      weight: 6  },
+  { id: 'the_hacker_news',   name: 'The Hacker News',  url: 'https://feeds.feedburner.com/TheHackersNews',           category: 'cyber',     weight: 6  },
+  { id: 'bleepingcomputer',  name: 'BleepingComputer', url: 'https://www.bleepingcomputer.com/feed/',                category: 'cyber',     weight: 6  },
+  { id: 'krebs_security',    name: 'Krebs on Security',url: 'https://krebsonsecurity.com/feed/',                     category: 'cyber',     weight: 6  },
 
   // Energy / utilities
   { id: 'utility_dive',      name: 'Utility Dive',     url: 'https://www.utilitydive.com/feeds/news/',               category: 'economics', weight: 7  },
 
-  // Biotech / pharma
+  // Biotech / pharma (FDA approvals etc. — the upside side of health news)
   { id: 'stat_news',         name: 'STAT News',        url: 'https://www.statnews.com/feed/',                        category: 'health',    weight: 9  },
 
   // Sports — non-ESPN coverage
@@ -119,21 +126,45 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'gamespot',          name: 'GameSpot News',    url: 'https://www.gamespot.com/feeds/news/',                  category: 'gaming',    weight: 7  },
 ] as const
 
+// Sources whose rows we keep for history but force inactive: the retired "doom"
+// adapters (exploits, severe weather, quakes, recalls). Listed by id so the
+// deactivation also reaches DBs that were seeded before they were retired.
+const RETIRED_SOURCE_IDS: string[] = [
+  'cisa_kev',
+  'nws_severe_alerts',
+  'usgs_quakes_sig',
+  'openfda_drug_recalls',
+  'openfda_device_recalls',
+  'openfda_food_recalls',
+]
+
 export async function seedIfEmpty() {
   await syncDefaultSources()
 }
 
 export async function syncDefaultSources() {
-  // Insert default news sources. Existing rows are left untouched so operators can
-  // keep local enable/disable and weight settings across deploys.
+  // weight + category are MANAGED here: re-applied on every boot so a rebalance
+  // actually reaches a long-running DB. (The previous onConflictDoNothing meant
+  // edits to this list never propagated past a fresh install.) is_active stays
+  // under operator control — except the retired adapters below, forced off.
   for (const source of DEFAULT_NEWS_SOURCES) {
     db.insert(newsSources)
       .values({ ...source, isActive: 1 })
-      .onConflictDoNothing()
+      .onConflictDoUpdate({
+        target: newsSources.id,
+        set: { weight: source.weight, category: source.category },
+      })
       .run()
   }
 
-  // Insert settings singleton
+  // Force-retire the doom adapters (keep the rows for history; just disable).
+  const retired = db.update(newsSources)
+    .set({ isActive: 0 })
+    .where(inArray(newsSources.id, RETIRED_SOURCE_IDS))
+    .run()
+
+  // Settings singleton — threshold stays 6.5 (backtest-supported). Left untouched
+  // on existing DBs so operator tuning survives.
   db.insert(settings)
     .values({
       id: 'singleton',
@@ -148,9 +179,8 @@ export async function syncDefaultSources() {
     .onConflictDoNothing()
     .run()
 
-  // Print row counts
   const sourcesCount = db.select().from(newsSources).all().length
   const settingsCount = db.select().from(settings).all().length
 
-  console.log(`[startup] default sources synced (${sourcesCount} news_sources, ${settingsCount} settings row)`)
+  console.log(`[startup] sources synced (${sourcesCount} news_sources, ${settingsCount} settings row; ${retired.changes} doom adapter(s) retired)`)
 }
