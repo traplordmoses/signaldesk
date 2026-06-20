@@ -19,7 +19,9 @@ function wordBoundaryMatch(text: string, kw: string): boolean {
   return re.test(text)
 }
 
-function extractKeywords(text: string): Set<string> {
+// Exported for the scheduler's cross-cycle near-duplicate guard (dedup of
+// similar posts within the hour, not just look-alikes inside one cluster batch).
+export function extractKeywords(text: string): Set<string> {
   const lower = text.toLowerCase()
   const keywords = getTier1And2Keywords()
   const found = new Set<string>()
@@ -29,7 +31,7 @@ function extractKeywords(text: string): Set<string> {
   return found
 }
 
-function keywordOverlap(a: Set<string>, b: Set<string>): number {
+export function keywordOverlap(a: Set<string>, b: Set<string>): number {
   let count = 0
   for (const kw of a) {
     if (b.has(kw)) count++

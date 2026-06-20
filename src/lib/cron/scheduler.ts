@@ -3,6 +3,7 @@ import { db, sqlite } from '@/lib/db'
 import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
 import { eq, and, gt, isNull, inArray } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
+import { extractKeywords, keywordOverlap } from '@/lib/news/clusterer'
 
 let started = false
 
@@ -80,6 +81,18 @@ const PENDING_TTL_MS = 8 * 60 * 60 * 1000
 // which is enough to let a strong story from a fresh category jump ahead.
 const DIVERSITY_WINDOW_MS = 3 * 60 * 60 * 1000  // 3h look-back
 const DIVERSITY_PENALTY = 2.0
+
+// Near-duplicate guard: skip a candidate that shares ≥ DEDUP_MIN_OVERLAP topical
+// keywords with a same-category post drafted within DEDUP_WINDOW_MS — i.e. "no
+// similar posts in the same category in the same hour".
+const DEDUP_WINDOW_MS = 60 * 60 * 1000  // 1h
+const DEDUP_MIN_OVERLAP = 2
+
+// Flatten an event_cluster's constituent_summaries JSON into one text blob for
+// keyword extraction.
+function summariesText(json: string | null): string {
+  try { return (JSON.parse(json ?? '[]') as string[]).join(' ') } catch { return '' }
+}
 
 function expireStalePendingPosts(): number {
   const cutoff = Date.now() - PENDING_TTL_MS
@@ -194,28 +207,62 @@ async function runAutoGenerate() {
     // qualify on the next tick (5 min later). Combined with the 5-min cron
     // interval this paces delivery at ~1 card every 2-3 minutes instead of
     // batches landing all at once.
+    // Near-duplicate guard: don't draft a story topically similar to one already
+    // drafted in the SAME category within the last hour. The clusterer merges
+    // look-alikes inside one batch, but a follow-up that ingests a few cycles
+    // later forms a fresh cluster — this stops it (or a same-category twin)
+    // re-posting in the same hour. Reuses the clusterer's keyword-overlap logic.
+    const dedupCutoff = Date.now() - DEDUP_WINDOW_MS
+    const recentDraftIds = db.select({ clusterId: generatedPosts.clusterId })
+      .from(generatedPosts)
+      .where(gt(generatedPosts.createdAt, dedupCutoff))
+      .all()
+      .map(r => r.clusterId)
+    const recentStories = recentDraftIds.length
+      ? db.select({
+          category: eventClusters.category,
+          canonicalHeadline: eventClusters.canonicalHeadline,
+          constituentSummaries: eventClusters.constituentSummaries,
+        })
+        .from(eventClusters)
+        .where(inArray(eventClusters.id, recentDraftIds))
+        .all()
+        .map(s => ({ category: s.category, kw: extractKeywords(`${s.canonicalHeadline} ${summariesText(s.constituentSummaries)}`) }))
+      : []
+    const candKwCache = new Map<string, Set<string>>()
+    const isNearDup = (c: typeof candidates[number]): boolean => {
+      if (recentStories.length === 0) return false
+      let ck = candKwCache.get(c.id)
+      if (!ck) {
+        ck = extractKeywords(`${c.canonicalHeadline} ${summariesText(c.constituentSummaries)}`)
+        candKwCache.set(c.id, ck)
+      }
+      return recentStories.some(r => r.category === c.category && keywordOverlap(ck!, r.kw) >= DEDUP_MIN_OVERLAP)
+    }
+
     const PER_CYCLE_CAP = 2
     // Editorial diversity: don't draft two same-category cards in one cycle.
-    // Walk the score-sorted candidates picking the first of each unseen
-    // category, so a crypto-heavy backlog doesn't post two crypto cards
-    // back-to-back. Then top up by raw rank if diversity left us short (e.g.
-    // every candidate is the same category). (Cross-cycle rotation — "don't
-    // post crypto twice in a row across ticks" — is a future add.)
+    // Walk the (diversity-adjusted) score order, picking the first of each unseen
+    // category and skipping near-duplicates of recent posts. Then top up by rank.
     const trimmed: typeof candidates = []
     const usedCategories = new Set<string>()
+    let dupSkipped = 0
     for (const c of candidates) {
       if (trimmed.length >= PER_CYCLE_CAP) break
+      if (isNearDup(c)) { dupSkipped++; continue }
       if (usedCategories.has(c.category)) continue
       trimmed.push(c)
       usedCategories.add(c.category)
     }
     for (const c of candidates) {
       if (trimmed.length >= PER_CYCLE_CAP) break
-      if (!trimmed.includes(c)) trimmed.push(c)
+      if (trimmed.includes(c)) continue
+      if (isNearDup(c)) continue
+      trimmed.push(c)
     }
     const deferred = candidates.length - trimmed.length
 
-    console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}${deferred > 0 ? ` — generating top ${trimmed.length}, deferring ${deferred} to next cycle` : ''}`)
+    console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}${dupSkipped ? ` (${dupSkipped} near-dup skipped)` : ''}${deferred > 0 ? ` — generating top ${trimmed.length}, deferring ${deferred} to next cycle` : ''}`)
 
     const { generateSmartPosts } = await import('@/lib/ai/generator')
 
