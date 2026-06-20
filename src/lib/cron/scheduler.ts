@@ -9,7 +9,7 @@ let started = false
 
 // Per-task overlap guards. Without these, a slow run of `runFetch` would let the
 // next 5-min tick stack on top of itself — eventually saturating Together AI / DB.
-const running = { fetch: false, generate: false, prune: false, markets: false }
+const running = { fetch: false, generate: false, prune: false, markets: false, feedback: false }
 
 const AUDIT_LOG_RETENTION_DAYS  = 30
 const NEWS_ITEM_RETENTION_DAYS  = 14   // only items already isProcessed=1
@@ -350,6 +350,26 @@ async function runMarketsRefresh() {
   }
 }
 
+// Recompute source weight bonuses from the team's Approve/Reject decisions, so
+// scraping leans toward sources reviewers actually approve. Gentle + gated on a
+// minimum sample (see lib/feedback). Runs daily + once on startup.
+async function runApprovalFeedback() {
+  if (running.feedback) {
+    console.warn('[cron] approval feedback skipped — previous run still in progress')
+    return
+  }
+  running.feedback = true
+  try {
+    const { recomputeSourceWeightBonus } = await import('@/lib/feedback')
+    const r = recomputeSourceWeightBonus()
+    console.log(`[cron] approval feedback: ${r.adjusted} source weight-bonus(es) set from ${r.sampled} sampled source(s)`)
+  } catch (e) {
+    console.error('[cron] approval feedback failed:', (e as Error).message)
+  } finally {
+    running.feedback = false
+  }
+}
+
 // Tracks the registered cron tasks so the shutdown handler can stop them
 // before closing the DB. Without this, an in-flight cron task could try to
 // write to a closed sqlite handle.
@@ -403,6 +423,9 @@ export function startScheduler() {
   // Run an immediate market refresh on startup so the scorer has data to
   // boost against before the first hourly tick.
   void runMarketsRefresh()
+
+  scheduledTasks.push(cron.schedule('30 3 * * *', runApprovalFeedback))  // daily 03:30 — learn from approvals
+  void runApprovalFeedback()
 
   registerGracefulShutdown()
 

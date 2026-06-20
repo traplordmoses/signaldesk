@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/schema'
 import { eq, gt } from 'drizzle-orm'
 import { SIGNALDESK_PROMPT_V1 } from './prompts'
+import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
 
 // Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
 // counts generated_posts in the last 24h, and blocks further generation when at/over.
@@ -179,11 +180,20 @@ Remember:
 
 Now write one post.`
 
+  // Reinforce the house style with the team's own recent picks (in-context
+  // learning from approvals) — only when we have enough, else just the static prompt.
+  let system = SIGNALDESK_PROMPT_V1
+  const approvedExamples = getApprovedExamples()
+  if (approvedExamples.length >= MIN_EXAMPLES) {
+    system += `\n\n══════════════════════════════════════\nRECENTLY APPROVED BY THE TEAM — these passed human review. Match this judgment and style:\n══════════════════════════════════════\n`
+      + approvedExamples.map(c => `"${c}"`).join('\n')
+  }
+
   const body = {
     model,
     max_tokens: 600,
     temperature: 0.8,
-    system: SIGNALDESK_PROMPT_V1,
+    system,
     messages: [{ role: 'user', content: userPrompt }],
   }
 

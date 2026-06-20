@@ -49,5 +49,10 @@ sqlite.exec(`
   CREATE INDEX IF NOT EXISTS idx_market_topics_volume   ON market_topics(volume_24h);
 `)
 
+// Additive column for approval-feedback source weighting (idempotent — the ALTER
+// throws once the column exists, which we ignore). Lets the feature land without
+// a RUN_MIGRATIONS step.
+try { sqlite.exec('ALTER TABLE news_sources ADD COLUMN weight_bonus REAL DEFAULT 0') } catch { /* column already exists — fine */ }
+
 export const db = drizzle(sqlite, { schema })
 export { sqlite }

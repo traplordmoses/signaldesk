@@ -734,7 +734,8 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
     }
 
     const { items } = result.value
-    const weight = source.weight ?? 5
+    // Base weight (seed-managed) + approval-feedback bonus (recomputeSourceWeightBonus).
+    const weight = (source.weight ?? 5) + (source.weightBonus ?? 0)
     // Dedup window for title-hash bumped from 4h → 24h. RSS feeds often re-publish
     // the same article hours later with a slightly mutated URL (rotating tracking
     // params, AMP variants my normalizer doesn't catch, etc.). 4h was too narrow

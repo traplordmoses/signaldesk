@@ -6,6 +6,9 @@ export const newsSources = sqliteTable('news_sources', {
   url: text('url').notNull(),
   category: text('category').notNull(),
   weight: integer('weight').default(5),
+  // Approval-feedback nudge, added to `weight` at score time. Managed by the
+  // recomputeSourceWeightBonus() job (not the seed) so the two never fight.
+  weightBonus: real('weight_bonus').default(0),
   isActive: integer('is_active').default(1),
   lastFetchedAt: integer('last_fetched_at'),
   lastError: text('last_error'),
