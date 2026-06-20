@@ -171,12 +171,11 @@ Market (reviewer metadata — NEVER put a URL in the tweet): ${marketUrl}
 ${modeInstruction}
 
 Remember:
-- Lead with anticipation, not a news alert. No "BREAKING:" / "JUST IN:" out of habit — frame the outcome that's still up for grabs.
-- Never write casualties or gore. For conflict stories, frame the open question neutrally and lean to the de-escalation angle.
-- Tasteful emoji ok (0–2). Never name Polymarket or Kalshi ("Probly" is fine). No URLs — a human adds the link.
-- pure_news (THE DROP): 1–2 punchy, forward-looking lines, optional hook.
-- news_odds (THE LINE): the development + the prediction, qualitative direction only (never invent a %).
-- engagement (THE ARC): 3–5 sentences of arc, then one sharp, fun, take-a-side question. ~280–320 characters.
+- pure_news = THE NEWS DROP (default): open with a colored-circle tag + BREAKING / JUST IN / NEW (🟣 general · ⚪️ tech/science/AI · 🌪️ weather), then a crisp fact + ONE context line. End on a "you call it" hook when the outcome is still undecided.
+- Never write casualties or gore. Frame hard news with curiosity and stakes ("how fast does this spread? 🧐"), never dread.
+- Emoji are on-brand (1–3, purposeful): 🟣 ⚪️ 🌪️ tags; 🫵🏻 🔮 🧐 ⚽️ hooks. Never name Polymarket or Kalshi ("Probly" is fine). No URLs — a human adds the link.
+- news_odds: a news drop leaning on where the odds are moving — qualitative direction only, never invent a %.
+- engagement = THE CALL: a stakes line, then a specific take-a-side question (sports / matchups / undecided outcomes).
 
 Now write one post.`
 
@@ -346,8 +345,9 @@ export async function generateSmartPosts(cluster: Cluster) {
   }
 
   // Auto-generation is locked to a single pure_news post per cluster.
-  // pure_news = "THE DROP": a crisp, forward-looking, optimistic take on what's
-  // in play — the Probly house voice (see prompts.ts). The richer modes
+  // pure_news = "THE NEWS DROP": a colored-circle BREAKING / JUST IN / NEW alert
+  // + a crisp fact + one context line (the @ProblyHQ house voice — see
+  // prompts.ts), with a "you call it" hook on undecided outcomes. The richer modes
   // (news_odds, engagement) remain available via the manual
   // /api/posts/generate endpoint with an explicit mode override, but the
   // 15-min auto-generate cron always emits pure_news.
