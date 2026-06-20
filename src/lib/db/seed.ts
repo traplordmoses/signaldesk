@@ -55,15 +55,17 @@ export const DEFAULT_NEWS_SOURCES = [
   // sentences. Real M&A / executive-departure / regulatory-action news
   // arrives via Reuters, AP, FT, Bloomberg etc. anyway.
   //
-  // ── Retired "doom" ingestion adapters ──────────────────────────────────────
-  // The CISA exploited-vulnerabilities, NWS severe-weather-alerts, USGS
-  // significant-earthquakes, and openFDA drug/device/food recall adapters used
-  // to seed here. They produce pure-negative signal that doesn't fit Probly's
-  // optimistic, market-driven feed, so they've been removed from the default set
-  // and are force-disabled on existing DBs (see RETIRED_SOURCE_IDS below). The
-  // adapter code still lives in fetcher.ts — re-enabling is just re-adding a row.
-  // Disaster stories with a genuinely active market still arrive via the
-  // markets-driven Google News pull below.
+  // ── Event / alert adapters ─────────────────────────────────────────────────
+  // Re-enabled to match the live @ProblyHQ feed, which posts 🌪️ weather alerts,
+  // ⚪️ security/exploit news, and disaster/health stories. (Briefly retired during
+  // the "optimistic only" pass.) Gore is still floored by the scorer's GORE /
+  // TRAGEDY guards — we keep the feed and block casualties, not the other way around.
+  { id: 'cisa_kev',          name: 'CISA Known Exploited Vulnerabilities', url: 'signaldesk://cisa/kev',                              category: 'cyber',     weight: 8  },
+  { id: 'nws_severe_alerts', name: 'National Weather Service Severe Alerts', url: 'signaldesk://nws/severe-alerts',                   category: 'weather',   weight: 8  },
+  { id: 'usgs_quakes_sig',   name: 'USGS Significant Earthquakes',    url: 'signaldesk://usgs/significant-quakes',                   category: 'weather',   weight: 7  },
+  { id: 'openfda_drug_recalls', name: 'openFDA Drug Recalls',         url: 'signaldesk://openfda/enforcement?kind=drug',              category: 'health',    weight: 7  },
+  { id: 'openfda_device_recalls', name: 'openFDA Device Recalls',     url: 'signaldesk://openfda/enforcement?kind=device',            category: 'health',    weight: 7  },
+  { id: 'openfda_food_recalls', name: 'openFDA Food Recalls',         url: 'signaldesk://openfda/enforcement?kind=food',              category: 'health',    weight: 7  },
 
   // Markets-driven news pull — uses the cached prediction-market topics
   // (Polymarket + Kalshi) to query Google News for recent articles on each
@@ -126,10 +128,11 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'gamespot',          name: 'GameSpot News',    url: 'https://www.gamespot.com/feeds/news/',                  category: 'gaming',    weight: 7  },
 ] as const
 
-// Sources whose rows we keep for history but force inactive: the retired "doom"
-// adapters (exploits, severe weather, quakes, recalls). Listed by id so the
-// deactivation also reaches DBs that were seeded before they were retired.
-const RETIRED_SOURCE_IDS: string[] = [
+// Event/alert adapters that an earlier "optimistic only" pass force-disabled.
+// Listed by id so we can flip them back ON in DBs that were seeded while they
+// were retired (onConflictDoUpdate below only manages weight/category, not
+// is_active, so it won't re-enable them on its own).
+const REACTIVATE_SOURCE_IDS: string[] = [
   'cisa_kev',
   'nws_severe_alerts',
   'usgs_quakes_sig',
@@ -157,10 +160,11 @@ export async function syncDefaultSources() {
       .run()
   }
 
-  // Force-retire the doom adapters (keep the rows for history; just disable).
-  const retired = db.update(newsSources)
-    .set({ isActive: 0 })
-    .where(inArray(newsSources.id, RETIRED_SOURCE_IDS))
+  // Force-reactivate the event/alert adapters on DBs where a prior pass disabled
+  // them (e.g. the live droplet from the "optimistic only" deploy).
+  const reactivated = db.update(newsSources)
+    .set({ isActive: 1 })
+    .where(inArray(newsSources.id, REACTIVATE_SOURCE_IDS))
     .run()
 
   // Settings singleton — threshold stays 6.5 (backtest-supported). Left untouched
@@ -182,5 +186,5 @@ export async function syncDefaultSources() {
   const sourcesCount = db.select().from(newsSources).all().length
   const settingsCount = db.select().from(settings).all().length
 
-  console.log(`[startup] sources synced (${sourcesCount} news_sources, ${settingsCount} settings row; ${retired.changes} doom adapter(s) retired)`)
+  console.log(`[startup] sources synced (${sourcesCount} news_sources, ${settingsCount} settings row; ${reactivated.changes} event/alert adapter(s) active)`)
 }

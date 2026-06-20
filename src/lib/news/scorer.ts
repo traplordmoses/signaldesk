@@ -118,8 +118,43 @@ const CATEGORIES: Category[] = [
     keywords: ['elon musk', 'tweet', 'tweets'],
   },
   {
-    name: 'weather', weight: 1, marquee: false,
-    keywords: ['temperature', 'heat wave', 'highest temperature', 'record heat', 'snowstorm', 'rainfall'],
+    name: 'weather', weight: 2, marquee: false,
+    keywords: [
+      'temperature', 'heat wave', 'highest temperature', 'record heat', 'snowstorm',
+      'rainfall', 'tornado', 'hurricane', 'typhoon', 'cyclone', 'blizzard', 'wildfire',
+      'flood', 'flash flood', 'earthquake', 'magnitude', 'severe storm', 'tsunami',
+      'heat dome', 'cold snap',
+    ],
+  },
+  {
+    name: 'health_science', weight: 2, marquee: false,
+    keywords: [
+      'fda approval', 'clinical trial', 'vaccine', 'outbreak', 'pandemic', 'virus',
+      'disease', 'cdc', 'breakthrough', 'gene therapy', 'crispr', 'medical', 'cancer',
+      'measles', 'bird flu', 'alzheimer', 'obesity drug', 'ozempic',
+    ],
+  },
+  {
+    name: 'space', weight: 3, marquee: true,
+    keywords: [
+      'nasa', 'rocket launch', 'satellite', 'mars', 'moon landing', 'lunar', 'asteroid',
+      'space station', 'spacewalk', 'telescope', 'orbit', 'astronaut', 'spacex', 'starship',
+    ],
+  },
+  {
+    name: 'gaming', weight: 2, marquee: false,
+    keywords: [
+      'video game', 'gta', 'playstation', 'xbox', 'nintendo', 'steam', 'twitch',
+      'esports', 'game release', 'console', 'speedrun', 'fortnite', 'minecraft',
+    ],
+  },
+  {
+    name: 'cyber', weight: 2, marquee: false,
+    keywords: [
+      'exploit', 'vulnerability', 'cve', 'zero-day', 'zero day', 'data breach', 'hacked',
+      'ransomware', 'malware', 'security flaw', 'known exploited', 'kev catalog',
+      'cyberattack', 'cracked', 'phishing',
+    ],
   },
 ]
 
@@ -156,9 +191,9 @@ const SOFT_NEGATIVE = [
   'fears', 'warns', 'warning', 'threat', 'turmoil', 'recall', 'ecocide',
   'backlash', 'slammed',
   // active-conflict framing (no casualties — those are GORE)
-  'war', 'at war', 'strikes', 'airstrike', 'attack', 'attacks', 'invasion',
+  'war', 'at war', 'airstrike', 'attack', 'attacks', 'invasion',
   'offensive', 'clash', 'clashes', 'escalation', 'escalates', 'missile',
-  'drone strike', 'shells', 'bombard', 'siege', 'warfare',
+  'drone strike', 'bombard', 'siege', 'warfare',
 ]
 
 // GORE — graphic violence / loss of life. Applied once (-4) AND hard-skipped by
