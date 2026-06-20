@@ -1,7 +1,7 @@
 import cron from 'node-cron'
 import { db, sqlite } from '@/lib/db'
 import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
-import { eq, and, gt, isNull } from 'drizzle-orm'
+import { eq, and, gt, isNull, inArray } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
 
 let started = false
@@ -74,6 +74,13 @@ async function runFetch() {
 // click on it if a reviewer decides it's still worth posting.
 const PENDING_TTL_MS = 8 * 60 * 60 * 1000
 
+// Cross-cycle category-diversity tuning. We dock a candidate DIVERSITY_PENALTY
+// points for every card in the same category generated within DIVERSITY_WINDOW_MS.
+// At 2.0/post a category posted twice recently effectively drops ~4 points,
+// which is enough to let a strong story from a fresh category jump ahead.
+const DIVERSITY_WINDOW_MS = 3 * 60 * 60 * 1000  // 3h look-back
+const DIVERSITY_PENALTY = 2.0
+
 function expireStalePendingPosts(): number {
   const cutoff = Date.now() - PENDING_TTL_MS
   const stale = db.select()
@@ -131,7 +138,7 @@ async function runAutoGenerate() {
     // Pre-LLM headline filter — drops opinion pieces, recaps, podcasts, etc.
     // before they cost an Anthropic call. Skipped clusters are marked
     // 'low_signal_skipped' so they don't re-qualify on the next tick.
-    const candidates = []
+    const candidates: typeof rawCandidates = []
     let skippedLowSignal = 0
     for (const c of rawCandidates) {
       if (isWorthyHeadline(c.canonicalHeadline)) {
@@ -152,11 +159,32 @@ async function runAutoGenerate() {
       return
     }
 
-    // Highest-scored first, so when the per-cycle cap kicks in we always
-    // generate the best stories. Tie-broken by recency (newer first).
+    // Cross-cycle diversity: look at the categories of cards generated in the
+    // last few hours and down-rank candidates whose category we've been posting
+    // a lot. During a big event (e.g. the World Cup) this stops 'sports' from
+    // monopolizing the feed and lets crypto / tech / culture surface, so the
+    // group gets a varied mix instead of ten of the same story.
+    const recentCutoff = Date.now() - DIVERSITY_WINDOW_MS
+    const recentClusterIds = db.select({ clusterId: generatedPosts.clusterId })
+      .from(generatedPosts)
+      .where(gt(generatedPosts.createdAt, recentCutoff))
+      .all()
+      .map(r => r.clusterId)
+    const recentCatCount = new Map<string, number>()
+    if (recentClusterIds.length > 0) {
+      const recentCats = db.select({ category: eventClusters.category })
+        .from(eventClusters)
+        .where(inArray(eventClusters.id, recentClusterIds))
+        .all()
+      for (const c of recentCats) recentCatCount.set(c.category, (recentCatCount.get(c.category) ?? 0) + 1)
+    }
+    const effectiveScore = (c: typeof candidates[number]) =>
+      (c.relevanceScore ?? 0) - DIVERSITY_PENALTY * (recentCatCount.get(c.category) ?? 0)
+
+    // Best first by diversity-adjusted score, tie-broken by recency (newer first).
     candidates.sort((a, b) => {
-      const scoreDiff = (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0)
-      if (scoreDiff !== 0) return scoreDiff
+      const d = effectiveScore(b) - effectiveScore(a)
+      if (d !== 0) return d
       return (b.firstSeenAt ?? 0) - (a.firstSeenAt ?? 0)
     })
 

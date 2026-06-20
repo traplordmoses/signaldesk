@@ -4,10 +4,12 @@ import { newsItems } from '@/lib/db/schema'
 import { inArray } from 'drizzle-orm'
 import type { EventCluster, GeneratedPost } from '@/types'
 
-// Lark Card Schema 2.0 — review cards use inline editable input so reviewers
-// can edit a draft directly in the group chat instead of via DM round-trip.
-// Schema 2.0 button clicks deliver to the Event Subscription URL (the
-// "card.action.trigger" callback subscription, not the legacy v1).
+// Lark Card Schema 1.0 ("v1"). Schema 2.0 cards fall back to an "upgrade your
+// app" placeholder on older mobile Lark/Feishu builds — even text-only bodies —
+// which is why review/updated cards weren't loading on some phones. v1 renders
+// on every client. Button clicks still arrive at /api/lark/callback as a
+// card.action.trigger with `action.value` = the button's `value` object, so the
+// callback handler (route.ts / handler.ts) is unchanged.
 
 const MODE_BADGES: Record<string, string> = {
   pure_news:  '⚡ Breaking',
@@ -100,10 +102,10 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
   }
 }
 
-// ====================== Schema 2.0 helpers ======================
+// ====================== Card helpers (Schema 1.0) ======================
 
 function md(content: string) {
-  return { tag: 'markdown', content }
+  return { tag: 'div', text: { tag: 'lark_md', content } }
 }
 
 function plainText(content: string) {
@@ -115,18 +117,15 @@ function callbackButton(opts: {
   type?: 'primary' | 'default' | 'danger'
   action: string
   postId?: string
-  formSubmit?: boolean
 }) {
   const value: Record<string, string> = { action: opts.action }
   if (opts.postId) value.postId = opts.postId
-  const button: Record<string, unknown> = {
+  return {
     tag: 'button',
     text: plainText(opts.text),
     type: opts.type ?? 'default',
-    behaviors: [{ type: 'callback', value }],
+    value,
   }
-  if (opts.formSubmit) button.form_action_type = 'submit'
-  return button
 }
 
 function urlButton(opts: { text: string; url: string; type?: 'primary' | 'default' }) {
@@ -134,36 +133,28 @@ function urlButton(opts: { text: string; url: string; type?: 'primary' | 'defaul
     tag: 'button',
     text: plainText(opts.text),
     type: opts.type ?? 'primary',
-    behaviors: [{
-      type: 'open_url',
-      default_url: opts.url,
-      pc_url: opts.url,
-      ios_url: opts.url,
-      android_url: opts.url,
-    }],
+    url: opts.url,
   }
 }
 
-function twoColumnButtons(left: object, right: object) {
-  return {
-    tag: 'column_set',
-    flex_mode: 'none',
-    columns: [
-      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
-    ],
-  }
+// Buttons in a row. v1 renders an `action` element's buttons side by side and
+// wraps them on narrow screens — no `column_set` (itself a Schema 2.0 element
+// that breaks on the same old clients). A lone button must also live in an
+// `action`, so every button goes through here.
+function buttonRow(...buttons: object[]) {
+  return { tag: 'action', actions: buttons }
 }
 
-function threeColumnButtons(left: object, middle: object, right: object) {
+// Wrap a v1 card. No `schema` field, elements live at the top level (not under
+// `body`) — that's what makes it v1.
+function card(opts: { title: string; template: string; elements: object[] }): object {
   return {
-    tag: 'column_set',
-    flex_mode: 'none',
-    columns: [
-      { tag: 'column', width: 'weighted', weight: 1, elements: [left] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [middle] },
-      { tag: 'column', width: 'weighted', weight: 1, elements: [right] },
-    ],
+    config: { wide_screen_mode: true },
+    header: {
+      title: plainText(opts.title),
+      template: opts.template,
+    },
+    elements: opts.elements,
   }
 }
 
@@ -202,10 +193,8 @@ export function buildReviewCard(
   let topics: string[] = []
   try { topics = JSON.parse(cluster.topics ?? '[]') } catch { topics = [] }
 
-  // ── Header block — condensed metadata. Schema 2.0 doesn't support the
-  // `note` element (Lark API error 200861: "cards of schema V2 no longer
-  // support this capability; unsupported tag note"). Using markdown rows
-  // with italic / bold formatting for the same visual hierarchy.
+  // ── Header block — condensed metadata as markdown rows (bold / italic) for
+  // visual hierarchy.
   elements.push(md(`**${cluster.canonicalHeadline}**`))
 
   const sourceLine = sourceNames.length > 0 ? sourceNames.join(' · ') : 'Unknown source'
@@ -239,7 +228,7 @@ export function buildReviewCard(
 
     // Two actions, side by side. The X composer at the manual post step
     // is the edit surface for any wording tweaks.
-    elements.push(twoColumnButtons(
+    elements.push(buttonRow(
       callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
       callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
     ))
@@ -247,99 +236,71 @@ export function buildReviewCard(
 
   // Pause bot at the bottom
   elements.push({ tag: 'hr' })
-  elements.push(callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' }))
+  elements.push(buttonRow(callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' })))
 
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText('📰 New posts ready for review'),
-      template: headerTemplate(cluster.riskLevel ?? 'low'),
-    },
-    body: { elements },
-  }
+  return card({
+    title: '📰 New posts ready for review',
+    template: headerTemplate(cluster.riskLevel ?? 'low'),
+    elements,
+  })
 }
 
 export function buildBotStatusCard(paused: boolean): object {
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText(paused ? '⏸ Bot Paused' : '▶️ Bot Resumed'),
-      template: paused ? 'grey' : 'green',
-    },
-    body: {
-      elements: [
-        md(paused
-          ? 'SignalDesk bot is now **paused**. No new posts will be sent to this group until you resume.'
-          : 'SignalDesk bot is now **active**. New high-scoring posts will be sent here automatically.'),
-        paused
-          ? callbackButton({ text: '▶️ Resume Bot', type: 'primary', action: 'resume_bot' })
-          : callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' }),
-      ],
-    },
-  }
+  return card({
+    title: paused ? '⏸ Bot Paused' : '▶️ Bot Resumed',
+    template: paused ? 'grey' : 'green',
+    elements: [
+      md(paused
+        ? 'SignalDesk bot is now **paused**. No new posts will be sent to this group until you resume.'
+        : 'SignalDesk bot is now **active**. New high-scoring posts will be sent here automatically.'),
+      buttonRow(paused
+        ? callbackButton({ text: '▶️ Resume Bot', type: 'primary', action: 'resume_bot' })
+        : callbackButton({ text: '⏸ Pause Bot', type: 'default', action: 'pause_bot' })),
+    ],
+  })
 }
 
 function buildApprovalCard(post: GeneratedPost): object {
   const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText('✅ Post approved — ready to publish'),
-      template: 'green',
-    },
-    body: {
-      elements: [
-        md(displayContent),
-        urlButton({ text: '🐦 Open X to post', url: intentUrl, type: 'primary' }),
-      ],
-    },
-  }
+  return card({
+    title: '✅ Post approved — ready to publish',
+    template: 'green',
+    elements: [
+      md(displayContent),
+      buttonRow(urlButton({ text: '🐦 Open X to post', url: intentUrl, type: 'primary' })),
+    ],
+  })
 }
 
 function buildUpdatedCard(cluster: EventCluster, post: GeneratedPost, actorName: string, approved: boolean): object {
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText(cluster.canonicalHeadline),
-      template: approved ? 'green' : 'grey',
-    },
-    body: {
-      elements: [
-        md(approved ? `✅ **Approved** by ${actorName}` : `❌ **Rejected** by ${actorName}`),
-        md(displayContent),
-      ],
-    },
-  }
+  return card({
+    title: cluster.canonicalHeadline,
+    template: approved ? 'green' : 'grey',
+    elements: [
+      md(approved ? `✅ **Approved** by ${actorName}` : `❌ **Rejected** by ${actorName}`),
+      md(displayContent),
+    ],
+  })
 }
 
 function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorName: string): object {
   const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return {
-    schema: '2.0',
-    config: { wide_screen_mode: true },
-    header: {
-      title: plainText(cluster.canonicalHeadline),
-      template: 'blue',
-    },
-    body: {
-      elements: [
-        md(`✏️ **Edited** by ${actorName}`),
-        md(displayContent),
-        md(`_${post.content.length}/280 chars_`),
-        // After edit, offer Approve / Reject again so the reviewer can publish or kill in one click.
-        twoColumnButtons(
-          callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
-          callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
-        ),
-      ],
-    },
-  }
+  return card({
+    title: cluster.canonicalHeadline,
+    template: 'blue',
+    elements: [
+      md(`✏️ **Edited** by ${actorName}`),
+      md(displayContent),
+      md(`_${post.content.length}/280 chars_`),
+      // After edit, offer Approve / Reject again so the reviewer can publish or kill in one click.
+      buttonRow(
+        callbackButton({ text: '✅ Approve', type: 'primary', action: 'approve', postId: post.id }),
+        callbackButton({ text: '❌ Reject',  type: 'danger',  action: 'reject',  postId: post.id }),
+      ),
+    ],
+  })
 }
 
 // ====================== Send / Update ======================
