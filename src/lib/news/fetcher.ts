@@ -550,7 +550,8 @@ const TRUSTED_GOOGLE_NEWS_PUBLISHERS = new Set<string>([
   'the guardian', 'guardian.com',
   'al jazeera', 'aljazeera', 'aljazeera.com',
   'dw', 'deutsche welle',
-  'reuters india', 'the japan times', 'the times of india',
+  // (India/Japan publishers removed — NA/Europe focus, the feed was over-indexing
+  // on Indian news.)
 
   // Business / finance
   'cnbc', 'cnbc.com',

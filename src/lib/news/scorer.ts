@@ -470,3 +470,17 @@ export function getTier1And2Keywords(): string[] {
   }
   return CLUSTER_KEYWORDS
 }
+
+// The top Polymarket content category for a headline (highest-weight match), or
+// null if none. Used by the scheduler to steer the post mix by what a story is
+// ABOUT, rather than which feed it arrived on (wires tag everything 'politics').
+export function detectCategory(title: string, summary = ''): string | null {
+  const text = (title + ' ' + (summary ?? '')).toLowerCase()
+  let best: { name: string; weight: number } | null = null
+  for (const cat of CATEGORIES) {
+    if (anyHit(text, cat.keywords) && (!best || cat.weight > best.weight)) {
+      best = { name: cat.name, weight: cat.weight }
+    }
+  }
+  return best?.name ?? null
+}

@@ -4,6 +4,7 @@ import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
 import { eq, and, gt, isNull, inArray } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
 import { extractKeywords, keywordOverlap } from '@/lib/news/clusterer'
+import { detectCategory } from '@/lib/news/scorer'
 
 let started = false
 
@@ -75,12 +76,37 @@ async function runFetch() {
 // click on it if a reviewer decides it's still worth posting.
 const PENDING_TTL_MS = 8 * 60 * 60 * 1000
 
-// Cross-cycle category-diversity tuning. We dock a candidate DIVERSITY_PENALTY
-// points for every card in the same category generated within DIVERSITY_WINDOW_MS.
-// At 2.0/post a category posted twice recently effectively drops ~4 points,
-// which is enough to let a strong story from a fresh category jump ahead.
-const DIVERSITY_WINDOW_MS = 3 * 60 * 60 * 1000  // 3h look-back
-const DIVERSITY_PENALTY = 2.0
+// Target post mix (the team's recommended category spread). We steer selection
+// toward it by what a story is ABOUT (scorer content-category), not which feed
+// it came from — under-represented buckets get a score boost, over-represented
+// ones a penalty, measured against the last day of generated posts.
+const MIX_WINDOW_MS = 24 * 60 * 60 * 1000
+const TARGET_BIAS_SCALE = 12   // score points per unit of (target − actual) share
+const TARGET_MIX: Record<string, number> = {
+  politics: 0.30,        // politics & elections (18%) + breaking/geopolitics (12%)
+  sports: 0.20,
+  economics: 0.13,
+  crypto: 0.05,
+  culture: 0.12,         // entertainment + music + gaming
+  science_health: 0.10,  // science + health + tech/AI + cyber + space
+  local: 0.10,           // local / hyperlocal — weather alerts + local events
+}
+// Roll both scorer (content) categories and source categories up into a target
+// bucket. Content-category wins (a Reuters story about a film buckets as culture,
+// not politics); the source category is the fallback.
+const BUCKET_OF: Record<string, string> = {
+  politics: 'politics', elections: 'politics', geopolitics: 'politics',
+  sports: 'sports', economy_finance: 'economics', economics: 'economics',
+  crypto: 'crypto',
+  pop_culture: 'culture', mentions: 'culture', gaming: 'culture', entertainment: 'culture', music: 'culture',
+  tech_ai: 'science_health', health_science: 'science_health', space: 'science_health',
+  cyber: 'science_health', tech: 'science_health', science: 'science_health', health: 'science_health',
+  weather: 'local',
+}
+function bucketOf(sourceCategory: string, headline: string, summaries: string | null): string {
+  const content = detectCategory(headline, summariesText(summaries))
+  return BUCKET_OF[content ?? ''] ?? BUCKET_OF[sourceCategory] ?? 'other'
+}
 
 // Near-duplicate guard: skip a candidate that shares ≥ DEDUP_MIN_OVERLAP topical
 // keywords with a same-category post drafted within DEDUP_WINDOW_MS — i.e. "no
@@ -172,29 +198,37 @@ async function runAutoGenerate() {
       return
     }
 
-    // Cross-cycle diversity: look at the categories of cards generated in the
-    // last few hours and down-rank candidates whose category we've been posting
-    // a lot. During a big event (e.g. the World Cup) this stops 'sports' from
-    // monopolizing the feed and lets crypto / tech / culture surface, so the
-    // group gets a varied mix instead of ten of the same story.
-    const recentCutoff = Date.now() - DIVERSITY_WINDOW_MS
-    const recentClusterIds = db.select({ clusterId: generatedPosts.clusterId })
+    // Target-mix steering: bias selection toward the recommended category spread
+    // by what each story is ABOUT (scorer category), not its feed. Under-served
+    // buckets get a boost, over-served ones a penalty, vs the last 24h of posts.
+    const mixCutoff = Date.now() - MIX_WINDOW_MS
+    const recentMixIds = db.select({ clusterId: generatedPosts.clusterId })
       .from(generatedPosts)
-      .where(gt(generatedPosts.createdAt, recentCutoff))
+      .where(gt(generatedPosts.createdAt, mixCutoff))
       .all()
       .map(r => r.clusterId)
-    const recentCatCount = new Map<string, number>()
-    if (recentClusterIds.length > 0) {
-      const recentCats = db.select({ category: eventClusters.category })
-        .from(eventClusters)
-        .where(inArray(eventClusters.id, recentClusterIds))
-        .all()
-      for (const c of recentCats) recentCatCount.set(c.category, (recentCatCount.get(c.category) ?? 0) + 1)
+    const bucketCount = new Map<string, number>()
+    let mixTotal = 0
+    if (recentMixIds.length > 0) {
+      const recentMix = db.select({
+        category: eventClusters.category,
+        canonicalHeadline: eventClusters.canonicalHeadline,
+        constituentSummaries: eventClusters.constituentSummaries,
+      }).from(eventClusters).where(inArray(eventClusters.id, recentMixIds)).all()
+      for (const c of recentMix) {
+        const b = bucketOf(c.category, c.canonicalHeadline, c.constituentSummaries)
+        bucketCount.set(b, (bucketCount.get(b) ?? 0) + 1)
+        mixTotal++
+      }
     }
-    const effectiveScore = (c: typeof candidates[number]) =>
-      (c.relevanceScore ?? 0) - DIVERSITY_PENALTY * (recentCatCount.get(c.category) ?? 0)
+    const effectiveScore = (c: typeof candidates[number]) => {
+      const b = bucketOf(c.category, c.canonicalHeadline, c.constituentSummaries)
+      const target = TARGET_MIX[b] ?? 0
+      const actual = mixTotal > 0 ? (bucketCount.get(b) ?? 0) / mixTotal : target
+      return (c.relevanceScore ?? 0) + TARGET_BIAS_SCALE * (target - actual)
+    }
 
-    // Best first by diversity-adjusted score, tie-broken by recency (newer first).
+    // Best first by target-adjusted score, tie-broken by recency (newer first).
     candidates.sort((a, b) => {
       const d = effectiveScore(b) - effectiveScore(a)
       if (d !== 0) return d

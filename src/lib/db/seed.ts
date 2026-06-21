@@ -126,6 +126,13 @@ export const DEFAULT_NEWS_SOURCES = [
 
   // Gaming
   { id: 'gamespot',          name: 'GameSpot News',    url: 'https://www.gamespot.com/feeds/news/',                  category: 'gaming',    weight: 7  },
+
+  // Breadth toward the target mix (NA / Europe — culture, gaming, tech, science)
+  { id: 'rolling_stone',     name: 'Rolling Stone',    url: 'https://www.rollingstone.com/feed/',                    category: 'entertainment', weight: 8 },
+  { id: 'ign',               name: 'IGN',              url: 'https://feeds.ign.com/ign/all',                         category: 'gaming',        weight: 7 },
+  { id: 'the_verge',         name: 'The Verge',        url: 'https://www.theverge.com/rss/index.xml',                category: 'tech',          weight: 8 },
+  { id: 'science_daily',     name: 'Science Daily',    url: 'https://www.sciencedaily.com/rss/all.xml',              category: 'science',       weight: 8 },
+  { id: 'new_scientist',     name: 'New Scientist',    url: 'https://www.newscientist.com/feed/home/',               category: 'science',       weight: 7 },
 ] as const
 
 // Event/alert adapters that an earlier "optimistic only" pass force-disabled.
@@ -140,6 +147,11 @@ const REACTIVATE_SOURCE_IDS: string[] = [
   'openfda_device_recalls',
   'openfda_food_recalls',
 ]
+
+// Sources force-disabled for the NA/Europe focus — India/Asia-centric feeds that
+// were skewing the feed toward Indian news. Rows kept for history; flip back on
+// by removing an id here.
+const DISABLE_SOURCE_IDS: string[] = ['scmp_world', 'toi_top', 'nikkei_asia']
 
 export async function seedIfEmpty() {
   await syncDefaultSources()
@@ -167,6 +179,12 @@ export async function syncDefaultSources() {
     .where(inArray(newsSources.id, REACTIVATE_SOURCE_IDS))
     .run()
 
+  // Force-disable the India/Asia-centric feeds (NA/Europe focus).
+  const geoDisabled = db.update(newsSources)
+    .set({ isActive: 0 })
+    .where(inArray(newsSources.id, DISABLE_SOURCE_IDS))
+    .run()
+
   // Settings singleton — threshold stays 6.5 (backtest-supported). Left untouched
   // on existing DBs so operator tuning survives.
   db.insert(settings)
@@ -186,5 +204,5 @@ export async function syncDefaultSources() {
   const sourcesCount = db.select().from(newsSources).all().length
   const settingsCount = db.select().from(settings).all().length
 
-  console.log(`[startup] sources synced (${sourcesCount} news_sources, ${settingsCount} settings row; ${reactivated.changes} event/alert adapter(s) active)`)
+  console.log(`[startup] sources synced (${sourcesCount} news_sources, ${settingsCount} settings row; ${reactivated.changes} event/alert active, ${geoDisabled.changes} geo-disabled)`)
 }
