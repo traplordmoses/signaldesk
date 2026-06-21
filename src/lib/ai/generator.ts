@@ -254,8 +254,17 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
   try {
     const result = await callClaude(cluster, marketUrl, modeHint)
 
-    // Force-strip ANY URL from ALL modes — tweets are text-only per marketing
-    result.content = result.content.replace(/https?:\/\/\S+/g, '').replace(/\n+$/, '').trim()
+    // Force-strip ANY URL from ALL modes (tweets are text-only per marketing),
+    // and convert em/en dashes to a comma — they read as AI-written, and the
+    // prompt asks the model to avoid them, but this guarantees it. (Regular
+    // hyphens in "2-0", "by-election", "rate-hike" are left untouched.)
+    result.content = result.content
+      .replace(/https?:\/\/\S+/g, '')
+      .replace(/\s*[—–]\s*/g, ', ')
+      .replace(/\s+,/g, ',')
+      .replace(/,\s*,/g, ', ')
+      .replace(/\n+$/, '')
+      .trim()
 
     const post = {
       id: crypto.randomUUID(),
