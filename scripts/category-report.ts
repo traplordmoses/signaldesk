@@ -9,6 +9,8 @@
  * (Default cutoff is the redesign deploy day.)
  */
 import { sqlite } from '../src/lib/db'
+import { detectCategory } from '../src/lib/news/scorer'
+import { TARGET_MIX, BUCKET_LABEL, bucketForCategory } from '../src/lib/mix'
 
 const cutoffArg = process.argv[2] ?? '2026-06-19'
 const cutoff = new Date(cutoffArg).getTime()
@@ -48,6 +50,29 @@ const postRows = sqlite.prepare(`
   GROUP BY ec.category
 `).all(cutoff, cutoff) as { category: string; before: number; after: number }[]
 beforeAfter('GENERATED POSTS by category  ← the headline comparison', postRows)
+
+// Redesigned-era posts bucketed by CONTENT category, vs the team's target table.
+const redesigned = sqlite.prepare(`
+  SELECT ec.category AS category, ec.canonical_headline AS headline, ec.constituent_summaries AS summaries
+  FROM generated_posts gp JOIN event_clusters ec ON ec.id = gp.cluster_id
+  WHERE gp.created_at >= ?
+`).all(cutoff) as { category: string; headline: string; summaries: string | null }[]
+if (redesigned.length > 0) {
+  const count = new Map<string, number>()
+  for (const p of redesigned) {
+    let s = ''
+    try { s = (JSON.parse(p.summaries ?? '[]') as string[]).join(' ') } catch { /* skip */ }
+    const b = bucketForCategory(detectCategory(p.headline, s), p.category)
+    count.set(b, (count.get(b) ?? 0) + 1)
+  }
+  console.log(`\n── REDESIGNED post mix vs TARGET  (content-bucketed, n=${redesigned.length}) ──`)
+  console.log(`  ${'bucket'.padEnd(24)} actual   target`)
+  for (const [b, t] of Object.entries(TARGET_MIX)) {
+    console.log(`  ${(BUCKET_LABEL[b] ?? b).padEnd(24)} ${pct(count.get(b) ?? 0, redesigned.length).padStart(5)}    ${Math.round(t * 100)}%`)
+  }
+  const other = count.get('other') ?? 0
+  if (other) console.log(`  ${BUCKET_LABEL.other.padEnd(24)} ${pct(other, redesigned.length).padStart(5)}     —`)
+}
 
 console.log(`\ncutoff ${cutoffArg}  ·  before = original severity-scored bot, after = redesigned bot`)
 console.log('note: the "redesigned" sample is thin until it has run a few days.\n')

@@ -5,6 +5,7 @@ import { eq, and, gt, isNull, inArray } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
 import { extractKeywords, keywordOverlap } from '@/lib/news/clusterer'
 import { detectCategory } from '@/lib/news/scorer'
+import { TARGET_MIX, bucketForCategory } from '@/lib/mix'
 
 let started = false
 
@@ -76,36 +77,14 @@ async function runFetch() {
 // click on it if a reviewer decides it's still worth posting.
 const PENDING_TTL_MS = 8 * 60 * 60 * 1000
 
-// Target post mix (the team's recommended category spread). We steer selection
-// toward it by what a story is ABOUT (scorer content-category), not which feed
-// it came from — under-represented buckets get a score boost, over-represented
-// ones a penalty, measured against the last day of generated posts.
+// Target post mix + bucket mapping live in lib/mix (shared with category-report).
+// We steer selection toward the target by what a story is ABOUT (scorer
+// content-category) — under-served buckets get a boost, over-served ones a
+// penalty, measured against the last day of posts.
 const MIX_WINDOW_MS = 24 * 60 * 60 * 1000
 const TARGET_BIAS_SCALE = 12   // score points per unit of (target − actual) share
-const TARGET_MIX: Record<string, number> = {
-  politics: 0.30,        // politics & elections (18%) + breaking/geopolitics (12%)
-  sports: 0.20,
-  economics: 0.13,
-  crypto: 0.05,
-  culture: 0.12,         // entertainment + music + gaming
-  science_health: 0.10,  // science + health + tech/AI + cyber + space
-  local: 0.10,           // local / hyperlocal — weather alerts + local events
-}
-// Roll both scorer (content) categories and source categories up into a target
-// bucket. Content-category wins (a Reuters story about a film buckets as culture,
-// not politics); the source category is the fallback.
-const BUCKET_OF: Record<string, string> = {
-  politics: 'politics', elections: 'politics', geopolitics: 'politics',
-  sports: 'sports', economy_finance: 'economics', economics: 'economics',
-  crypto: 'crypto',
-  pop_culture: 'culture', mentions: 'culture', gaming: 'culture', entertainment: 'culture', music: 'culture',
-  tech_ai: 'science_health', health_science: 'science_health', space: 'science_health',
-  cyber: 'science_health', tech: 'science_health', science: 'science_health', health: 'science_health',
-  weather: 'local',
-}
 function bucketOf(sourceCategory: string, headline: string, summaries: string | null): string {
-  const content = detectCategory(headline, summariesText(summaries))
-  return BUCKET_OF[content ?? ''] ?? BUCKET_OF[sourceCategory] ?? 'other'
+  return bucketForCategory(detectCategory(headline, summariesText(summaries)), sourceCategory)
 }
 
 // Near-duplicate guard: skip a candidate that shares ≥ DEDUP_MIN_OVERLAP topical
