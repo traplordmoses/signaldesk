@@ -223,8 +223,7 @@ export function buildReviewCard(
     elements.push(md(`**${badge}**  ·  _${displayContent.length}/280 chars_`))
 
     // Tweet quote — always visible so reviewer can read before deciding
-    const quoted = displayContent.split('\n').map(l => `> ${l}`).join('\n')
-    elements.push(md(quoted))
+    const quoted = displayContent    elements.push(md(quoted))
 
     // Two actions, side by side. The X composer at the manual post step
     // is the edit surface for any wording tweaks.
@@ -262,8 +261,7 @@ export function buildBotStatusCard(paused: boolean): object {
 
 function buildApprovalCard(post: GeneratedPost): object {
   const intentUrl = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(post.content)
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return card({
+  const displayContent = post.content  return card({
     title: '✅ Post approved — ready to publish',
     template: 'green',
     elements: [
@@ -274,8 +272,7 @@ function buildApprovalCard(post: GeneratedPost): object {
 }
 
 function buildUpdatedCard(cluster: EventCluster, post: GeneratedPost, actorName: string, approved: boolean): object {
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return card({
+  const displayContent = post.content  return card({
     title: cluster.canonicalHeadline,
     template: approved ? 'green' : 'grey',
     elements: [
@@ -286,8 +283,7 @@ function buildUpdatedCard(cluster: EventCluster, post: GeneratedPost, actorName:
 }
 
 function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorName: string): object {
-  const displayContent = post.content.split('\n').map(l => `> ${l}`).join('\n')
-  return card({
+  const displayContent = post.content  return card({
     title: cluster.canonicalHeadline,
     template: 'blue',
     elements: [
