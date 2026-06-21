@@ -129,7 +129,6 @@ export const DEFAULT_NEWS_SOURCES = [
 
   // Breadth toward the target mix (NA / Europe — culture, gaming, tech, science)
   { id: 'rolling_stone',     name: 'Rolling Stone',    url: 'https://www.rollingstone.com/feed/',                    category: 'entertainment', weight: 8 },
-  { id: 'ign',               name: 'IGN',              url: 'https://feeds.ign.com/ign/all',                         category: 'gaming',        weight: 7 },
   { id: 'the_verge',         name: 'The Verge',        url: 'https://www.theverge.com/rss/index.xml',                category: 'tech',          weight: 8 },
   { id: 'science_daily',     name: 'Science Daily',    url: 'https://www.sciencedaily.com/rss/all.xml',              category: 'science',       weight: 8 },
   { id: 'new_scientist',     name: 'New Scientist',    url: 'https://www.newscientist.com/feed/home/',               category: 'science',       weight: 7 },
@@ -148,10 +147,11 @@ const REACTIVATE_SOURCE_IDS: string[] = [
   'openfda_food_recalls',
 ]
 
-// Sources force-disabled for the NA/Europe focus — India/Asia-centric feeds that
-// were skewing the feed toward Indian news. Rows kept for history; flip back on
-// by removing an id here.
-const DISABLE_SOURCE_IDS: string[] = ['scmp_world', 'toi_top', 'nikkei_asia']
+// Sources force-disabled. India/Asia-centric feeds (skewing the feed toward
+// Indian news) + feeds that are persistently Cloudflare-blocked / unparseable
+// (tmz, ign — both 403, and redundant with other entertainment/gaming sources).
+// Rows kept for history; flip back on by removing an id here.
+const DISABLE_SOURCE_IDS: string[] = ['scmp_world', 'toi_top', 'nikkei_asia', 'tmz', 'ign']
 
 export async function seedIfEmpty() {
   await syncDefaultSources()
