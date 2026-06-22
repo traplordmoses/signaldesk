@@ -59,6 +59,7 @@ export const generatedPosts = sqliteTable('generated_posts', {
   charCount: integer('char_count').notNull(),
   estimatedScore: real('estimated_score'),
   scoreExplanation: text('score_explanation'),
+  signals: text('signals'),
   status: text('status').default('pending'),
   rejectionReason: text('rejection_reason'),
   postedAt: integer('posted_at'),

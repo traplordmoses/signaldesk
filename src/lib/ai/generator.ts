@@ -3,6 +3,9 @@ import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/sche
 import { eq, gt } from 'drizzle-orm'
 import { SIGNALDESK_PROMPT_V1 } from './prompts'
 import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
+import { detectCategory } from '@/lib/news/scorer'
+import { marketFit } from '@/lib/markets'
+import { bucketForCategory } from '@/lib/mix'
 
 // Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
 // counts generated_posts in the last 24h, and blocks further generation when at/over.
@@ -266,6 +269,27 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       .replace(/\n+$/, '')
       .trim()
 
+    // Decision telemetry: capture the signals behind this draft — the relevance
+    // score, the target-mix bucket, the content category, and whether it maps to
+    // a live market — stored alongside the post so that joining signals → status
+    // (approved / rejected / posted) teaches us what the team actually wants. All
+    // cheap + synchronous (string/keyword matching + an in-memory market lookup).
+    let signalSummary = ''
+    try { signalSummary = (JSON.parse(cluster.constituentSummaries ?? '[]') as string[]).join(' ') } catch { /* keep '' */ }
+    const contentCategory = detectCategory(cluster.canonicalHeadline, signalSummary)
+    const fit = marketFit(cluster.canonicalHeadline, signalSummary)
+    const bucket = bucketForCategory(contentCategory, cluster.category)
+    const signals = JSON.stringify({
+      score: Number((cluster.relevanceScore ?? 0).toFixed(2)),
+      bucket,
+      contentCategory,
+      sourceCategory: cluster.category,
+      market: { matched: fit.matched, category: fit.category, volume: Math.round(fit.maxVolume) },
+      mode: result.content_mode,
+      chars: result.char_count ?? result.content.length,
+    })
+    console.log(`[generate] ${bucket} · ${contentCategory ?? cluster.category} · score ${(cluster.relevanceScore ?? 0).toFixed(1)} · market ${fit.matched ? fit.category : 'none'} · ${result.content_mode} · ${result.char_count ?? result.content.length}c — ${cluster.canonicalHeadline.slice(0, 60)}`)
+
     const post = {
       id: crypto.randomUUID(),
       clusterId: cluster.id,
@@ -275,6 +299,7 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       charCount: result.char_count ?? result.content.length,
       estimatedScore: result.estimated_score,
       scoreExplanation: result.score_explanation,
+      signals,
       status: 'pending' as const,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -288,7 +313,7 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
         eventType: 'post_generated',
         entityType: 'generated_post',
         entityId: post.id,
-        details: JSON.stringify({ clusterId: cluster.id, mode: result.content_mode, hasMarket: result.has_market }),
+        details: JSON.stringify({ clusterId: cluster.id, mode: result.content_mode, hasMarket: result.has_market, bucket, score: Number((cluster.relevanceScore ?? 0).toFixed(2)), market: fit.category }),
         createdAt: Date.now(),
       }).run()
     } catch (e) {

@@ -54,5 +54,10 @@ sqlite.exec(`
 // a RUN_MIGRATIONS step.
 try { sqlite.exec('ALTER TABLE news_sources ADD COLUMN weight_bonus REAL DEFAULT 0') } catch { /* column already exists — fine */ }
 
+// Decision telemetry: the signals behind each draft (score, target bucket,
+// market-fit, mode) stored as JSON, so over time we can learn what the team
+// approves and tune scoring/selection from real outcomes. Idempotent ALTER.
+try { sqlite.exec('ALTER TABLE generated_posts ADD COLUMN signals TEXT') } catch { /* column already exists — fine */ }
+
 export const db = drizzle(sqlite, { schema })
 export { sqlite }
