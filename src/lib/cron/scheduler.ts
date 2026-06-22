@@ -1,7 +1,7 @@
 import cron from 'node-cron'
 import { db, sqlite } from '@/lib/db'
 import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
-import { eq, and, gt, isNull, inArray } from 'drizzle-orm'
+import { eq, and, gt, isNull, inArray, desc } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
 import { extractKeywords, keywordOverlap } from '@/lib/news/clusterer'
 import { detectCategory } from '@/lib/news/scorer'
@@ -141,6 +141,21 @@ async function runAutoGenerate() {
     const threshold = config?.autoGenerateThreshold ?? 6.5
     const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000
 
+    // Pace delivery: if the last post went out less than post_cooldown_minutes
+    // ago, skip this cycle. Spreads posts evenly across the day instead of
+    // bursting to the daily cap and then going silent for hours. This (not the
+    // daily cap) is the real cadence knob — set post_cooldown_minutes to taste.
+    const cooldownMin = config?.postCooldownMinutes ?? 15
+    const lastPost = db.select({ createdAt: generatedPosts.createdAt })
+      .from(generatedPosts)
+      .orderBy(desc(generatedPosts.createdAt))
+      .limit(1)
+      .get()
+    if (lastPost?.createdAt && Date.now() - lastPost.createdAt < cooldownMin * 60_000) {
+      console.log(`[cron] auto-generate: paced — ${Math.round((Date.now() - lastPost.createdAt) / 60000)}m since last post (cooldown ${cooldownMin}m)`)
+      return
+    }
+
     const rawCandidates = db.select()
       .from(eventClusters)
       .where(
@@ -253,7 +268,7 @@ async function runAutoGenerate() {
       return recentStories.some(r => r.category === c.category && keywordOverlap(ck!, r.kw) >= DEDUP_MIN_OVERLAP)
     }
 
-    const PER_CYCLE_CAP = 2
+    const PER_CYCLE_CAP = 1
     // Editorial diversity: don't draft two same-category cards in one cycle.
     // Walk the (diversity-adjusted) score order, picking the first of each unseen
     // category and skipping near-duplicates of recent posts. Then top up by rank.
