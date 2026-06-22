@@ -39,6 +39,37 @@ export function keywordOverlap(a: Set<string>, b: Set<string>): number {
   return count
 }
 
+// Broad stopword list for topical-dedup tokenization. extractKeywords above is
+// limited to the curated scoring vocabulary, which has topic words ("world cup")
+// but no proper nouns ("Messi", "Argentina") — so two stories about the same
+// specific entity shared too few keywords to be caught as duplicates.
+const TOPICAL_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'of', 'to', 'in', 'on', 'at', 'for',
+  'with', 'from', 'by', 'as', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'it', 'its', 'this', 'that', 'these', 'those', 'his', 'her', 'their', 'our',
+  'your', 'they', 'them', 'we', 'you', 'will', 'would', 'can', 'could', 'has',
+  'have', 'had', 'not', 'no', 'new', 'just', 'now', 'out', 'off', 'over', 'into',
+  'after', 'before', 'about', 'more', 'than', 'then', 'first', 'last', 'amid',
+  'set', 'says', 'said', 'say', 'who', 'what', 'when', 'where', 'why', 'how',
+  'which', 'all', 'any', 'some', 'still', 'get', 'got', 'make', 'made', 'via',
+  'per', 'vs', 'ahead', 'back', 'one', 'two',
+])
+
+/**
+ * Significant content tokens for near-duplicate detection — every word ≥3 chars
+ * that isn't a stopword (proper nouns included). Paired with an overlap ratio in
+ * the scheduler to catch two stories about the same specific entity/event.
+ */
+export function topicalTokens(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const raw of text.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (raw.length < 3) continue
+    if (TOPICAL_STOPWORDS.has(raw)) continue
+    out.add(raw)
+  }
+  return out
+}
+
 // Window for merging a freshly-clustered batch into an existing recent cluster
 // within the same category. Without this, the same breaking story spawns a new
 // cluster every 5-min cron tick: cluster A's items get isProcessed=1, then a

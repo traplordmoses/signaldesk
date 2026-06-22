@@ -3,7 +3,7 @@ import { db, sqlite } from '@/lib/db'
 import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
 import { eq, and, gt, isNull, inArray, desc } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
-import { extractKeywords, keywordOverlap } from '@/lib/news/clusterer'
+import { topicalTokens, keywordOverlap } from '@/lib/news/clusterer'
 import { detectCategory } from '@/lib/news/scorer'
 import { TARGET_MIX, bucketForCategory } from '@/lib/mix'
 
@@ -87,11 +87,15 @@ function bucketOf(sourceCategory: string, headline: string, summaries: string | 
   return bucketForCategory(detectCategory(headline, summariesText(summaries)), sourceCategory)
 }
 
-// Near-duplicate guard: skip a candidate that shares ≥ DEDUP_MIN_OVERLAP topical
-// keywords with a same-category post drafted within DEDUP_WINDOW_MS — i.e. "no
-// similar posts in the same category in the same hour".
-const DEDUP_WINDOW_MS = 60 * 60 * 1000  // 1h
-const DEDUP_MIN_OVERLAP = 2
+// Near-duplicate guard: skip a candidate that is topically too similar to a
+// same-category post drafted within DEDUP_WINDOW_MS. We compare real content
+// tokens (proper nouns included) and require BOTH a minimum shared-token count
+// and a high overlap ratio, so "Messi breaks the WC scoring record" twice is
+// caught, but two different World Cup matches (which share only "world cup 2026")
+// are not. Tokens come from headline + summaries.
+const DEDUP_WINDOW_MS = 2 * 60 * 60 * 1000  // 2h
+const DEDUP_MIN_SHARED = 4    // ≥4 shared topical tokens, AND…
+const DEDUP_MIN_COEF = 0.5    // …≥50% of the smaller token set overlaps
 
 // Flatten an event_cluster's constituent_summaries JSON into one text blob for
 // keyword extraction.
@@ -255,17 +259,22 @@ async function runAutoGenerate() {
         .from(eventClusters)
         .where(inArray(eventClusters.id, recentDraftIds))
         .all()
-        .map(s => ({ category: s.category, kw: extractKeywords(`${s.canonicalHeadline} ${summariesText(s.constituentSummaries)}`) }))
+        .map(s => ({ category: s.category, kw: topicalTokens(`${s.canonicalHeadline} ${summariesText(s.constituentSummaries)}`) }))
       : []
     const candKwCache = new Map<string, Set<string>>()
     const isNearDup = (c: typeof candidates[number]): boolean => {
       if (recentStories.length === 0) return false
       let ck = candKwCache.get(c.id)
       if (!ck) {
-        ck = extractKeywords(`${c.canonicalHeadline} ${summariesText(c.constituentSummaries)}`)
+        ck = topicalTokens(`${c.canonicalHeadline} ${summariesText(c.constituentSummaries)}`)
         candKwCache.set(c.id, ck)
       }
-      return recentStories.some(r => r.category === c.category && keywordOverlap(ck!, r.kw) >= DEDUP_MIN_OVERLAP)
+      return recentStories.some(r => {
+        if (r.category !== c.category) return false
+        const shared = keywordOverlap(ck!, r.kw)
+        if (shared < DEDUP_MIN_SHARED) return false
+        return shared / Math.min(ck!.size, r.kw.size || 1) >= DEDUP_MIN_COEF
+      })
     }
 
     const PER_CYCLE_CAP = 1
