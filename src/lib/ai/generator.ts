@@ -6,6 +6,7 @@ import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
 import { detectCategory } from '@/lib/news/scorer'
 import { marketFit } from '@/lib/markets'
 import { bucketForCategory } from '@/lib/mix'
+import { emojisForCategory } from '@/lib/emoji'
 
 // Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
 // counts generated_posts in the last 24h, and blocks further generation when at/over.
@@ -159,6 +160,11 @@ async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: Conten
   const safeHeadline = sanitizeForPrompt(cluster.canonicalHeadline, 240)
   const safeCategory = sanitizeForPrompt(cluster.category, 40)
 
+  // Per-story emoji palette: hand the model the SPECIFIC on-theme emoji (⚽ ₿ 🤖
+  // 🎬) for this story's category so posts stop defaulting to a bare 🟣. Prefer
+  // the finer detected category, fall back to the source category.
+  const emojiOptions = emojisForCategory(detectCategory(safeHeadline, summaryText), cluster.category)
+
   const ageMinutes = Math.round((Date.now() - cluster.firstSeenAt) / 60000)
   const modeInstruction = modeHint
     ? `You MUST use content_mode: "${modeHint}".`
@@ -170,16 +176,17 @@ Relevance score: ${(cluster.relevanceScore ?? 0).toFixed(1)}/10
 
 Headline: ${safeHeadline}
 Context/Summary: ${summaryText || '(no additional context)'}
+Category emoji for this story — REQUIRED, work in 1–2 that genuinely fit (if the set is wrong for this specific story, pick a better-fitting emoji): ${emojiOptions.join(' ')}
 Market (reviewer metadata — NEVER put a URL in the tweet): ${marketUrl}
 
 ${modeInstruction}
 
 Remember:
-- pure_news = THE NEWS DROP (default): open with a colored-circle tag + BREAKING / JUST IN / NEW (🟣 general · ⚪️ tech/science/AI · 🌪️ weather), then a crisp fact + ONE context line. End on a "you call it" hook when the outcome is still undecided.
-- Never write casualties or gore. Frame hard news with curiosity and stakes ("how fast does this spread? 🧐"), never dread.
-- Emoji are on-brand (1–3, purposeful): 🟣 ⚪️ 🌪️ tags; 🫵🏻 🔮 🧐 ⚽️ hooks. Never name Polymarket or Kalshi ("Probly" is fine). No URLs — a human adds the link.
-- news_odds: a news drop leaning on where the odds are moving — qualitative direction only, never invent a %.
-- engagement = THE CALL: a stakes line, then a specific take-a-side question (sports / matchups / undecided outcomes).
+- SHAPE: colored-circle alert tag + BREAKING / JUST IN / NEW (🟣 general · ⚪️ tech/science/AI · 🌪️ weather), then a crisp fact + ONE context line.
+- EMOJI MUST POP: lead like "🟣⚽ JUST IN:" — the colored circle is the alert tag, the category emoji (⚽ ₿ 🤖 🎬 🗳️) is what makes the post pop. Every post carries one, drawn from the set above. 2–3 emoji total, all purposeful — never spam, never an emoji that doesn't fit.
+- HOOK = THE POINT: this is Probly, "guess the future." Unless the story is a settled final result, end by pivoting to what's still undecided and inviting the call — a specific, take-a-side question ("Cruise or upset? 🔮", "Breakout or fakeout? 📈", "Does he name a date this week?"), never a generic "what do you think?".
+- Never casualties or gore — curiosity and stakes, never dread. Never name Polymarket or Kalshi ("Probly" is fine). No URLs. No em-dashes.
+- news_odds: lean on where the odds are moving — qualitative direction only, never invent a %. engagement: open on the stakes, then the take-a-side question.
 
 Now write one post.`
 
@@ -188,7 +195,7 @@ Now write one post.`
   let system = SIGNALDESK_PROMPT_V1
   const approvedExamples = getApprovedExamples()
   if (approvedExamples.length >= MIN_EXAMPLES) {
-    system += `\n\n══════════════════════════════════════\nRECENTLY APPROVED BY THE TEAM — these passed human review. Match this judgment and style:\n══════════════════════════════════════\n`
+    system += `\n\n══════════════════════════════════════\nRECENTLY APPROVED BY THE TEAM — these passed human review. Match their news judgment and topic mix, but STILL apply the emoji + hook rules above: older approved posts may predate them, so don't copy a bare-🟣, hookless style just because an example has it.\n══════════════════════════════════════\n`
       + approvedExamples.map(c => `"${c}"`).join('\n')
   }
 
