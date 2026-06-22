@@ -19,7 +19,7 @@ import { describe, it, expect } from 'vitest'
 import os from 'node:os'
 import path from 'node:path'
 process.env.DB_PATH = path.join(os.tmpdir(), 'signaldesk-scorer-test.db')
-import { detectRisk, scoreItem } from './scorer'
+import { detectRisk, scoreItem, detectCategory } from './scorer'
 
 describe('detectRisk', () => {
   describe('TRAGEDY → high (auto-skip)', () => {
@@ -206,4 +206,25 @@ describe('scoreItem — LOCAL_CRIME penalty', () => {
     const score = scoreItem('Burglary suspect arrested', '', lowWeight, oldTs)
     expect(score).toBeGreaterThanOrEqual(0)
   })
+})
+
+describe('detectCategory — most-hits wins, no megacap hijack into tech_ai', () => {
+  // Regression: a single megacap/marquee keyword used to hijack a story into
+  // tech_ai/space (marquee weight 3), collapsing finance/gaming/culture into the
+  // science_health bucket and mislabelling its emoji. Counting hits lets the
+  // story's dominant signal win instead.
+  const cases: [string, string][] = [
+    ['Wall Street is chasing growth, but contrarian investors are loading up on value plays', 'economy_finance'],
+    ['SpaceX kicked off marketing for its first-ever investment-grade bond sale', 'economy_finance'],
+    ['Halo: Combat Evolved is dropping on PlayStation next month for the first time', 'gaming'],
+    ['Romeo Beckham made his acting debut in a tennis romance film', 'pop_culture'],
+    ['Micron inked a supply agreement with Anthropic for memory and storage', 'tech_ai'],
+    ['Lionel Messi broke the World Cup all-time scoring record with his 17th goal', 'sports'],
+    ['Bitcoin and altcoins are climbing but derivatives traders are hedging hard', 'crypto'],
+  ]
+  for (const [headline, expected] of cases) {
+    it(`classifies "${headline.slice(0, 38)}…" as ${expected}`, () => {
+      expect(detectCategory(headline)).toBe(expected)
+    })
+  }
 })

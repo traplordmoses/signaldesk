@@ -61,11 +61,9 @@ const CATEGORIES: Category[] = [
     keywords: [
       'openai', 'anthropic', 'claude', 'chatgpt', 'gpt-', 'gpt-5', 'gemini',
       'deepseek', 'mistral', 'grok', 'xai', 'artificial intelligence', 'ai model',
-      'ai race', 'machine learning', 'spacex', 'starship', 'rocket launch',
-      'nvidia', 'semiconductor', 'quantum computing', 'product launch', 'launches',
-      'unveils', 'ipo', 'goes public', 'iphone', 'apple', 'microsoft', 'google',
-      'alphabet', 'meta', 'tesla', 'amazon', 'gta vi', 'release date', 'keynote',
-      'robotaxi',
+      'ai race', 'machine learning', 'nvidia', 'semiconductor', 'quantum computing',
+      'iphone', 'apple', 'microsoft', 'google', 'alphabet', 'meta', 'tesla',
+      'amazon', 'gta vi', 'robotaxi',
     ],
   },
   {
@@ -76,6 +74,7 @@ const CATEGORIES: Category[] = [
       'billboard', 'number one', 'chart-topping', 'album', 'world tour',
       'taylor swift', 'beyonce', 'celebrity', 'season finale', 'netflix',
       'disney', 'marvel', 'mrbeast', 'goes viral', 'streaming record',
+      'film', 'movie', 'actor', 'actress', 'hollywood', 'tv series',
     ],
   },
   {
@@ -83,9 +82,12 @@ const CATEGORIES: Category[] = [
     keywords: [
       'fed', 'federal reserve', 'fomc', 'rate cut', 'rate hike', 'rate decision',
       'interest rate', 'inflation', 'cpi report', 'jobs report', 'gdp', 'earnings',
-      'guidance', 's&p 500', 'nasdaq', 'dow jones', 'gold', 'silver', 'crude oil',
-      'oil price', 'commodities', 'treasury yield', 'jackson hole', 'recession',
-      'unemployment', 'tariff', 'trade deal', 'fda approval', 'acquisition', 'merger',
+      'guidance', 's&p 500', 'nasdaq', 'dow jones', 'wall street', 'stock market',
+      'stocks', 'equities', 'investors', 'bond', 'bond sale', 'ipo', 'goes public',
+      'buyback', 'hedge fund', 'short seller', 'dividend', 'valuation', 'gold',
+      'silver', 'crude oil', 'oil price', 'commodities', 'treasury yield',
+      'jackson hole', 'recession', 'unemployment', 'tariff', 'trade deal',
+      'acquisition', 'merger',
     ],
   },
   {
@@ -476,10 +478,17 @@ export function getTier1And2Keywords(): string[] {
 // ABOUT, rather than which feed it arrived on (wires tag everything 'politics').
 export function detectCategory(title: string, summary = ''): string | null {
   const text = (title + ' ' + (summary ?? '')).toLowerCase()
-  let best: { name: string; weight: number } | null = null
+  // Most keyword hits wins (the strongest topical signal), weight breaks ties.
+  // Previously the highest-WEIGHT category that fired won, so a single megacap
+  // mention ("Apple" in a markets story) hijacked it into tech_ai just because
+  // tech_ai is marquee-weighted — collapsing finance/gaming/culture into the
+  // science_health bucket. Counting hits lets the story's dominant signal win.
+  let best: { name: string; hits: number; weight: number } | null = null
   for (const cat of CATEGORIES) {
-    if (anyHit(text, cat.keywords) && (!best || cat.weight > best.weight)) {
-      best = { name: cat.name, weight: cat.weight }
+    const hits = countHits(text, cat.keywords, 6)
+    if (hits === 0) continue
+    if (!best || hits > best.hits || (hits === best.hits && cat.weight > best.weight)) {
+      best = { name: cat.name, hits, weight: cat.weight }
     }
   }
   return best?.name ?? null
