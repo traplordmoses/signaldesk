@@ -78,7 +78,7 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'euronews',          name: 'Euronews',         url: 'https://www.euronews.com/rss',                          category: 'politics',  weight: 8  },
   { id: 'time_news',         name: 'Time',             url: 'https://time.com/feed/',                                category: 'politics',  weight: 7  },
   { id: 'scmp_world',        name: 'SCMP',             url: 'https://www.scmp.com/rss/91/feed/',                     category: 'politics',  weight: 9  },
-  { id: 'cbc_top',           name: 'CBC Top Stories',  url: 'https://www.cbc.ca/webfeed/rss/rss-topstories',         category: 'politics',  weight: 8  },
+  { id: 'cbc_top',           name: 'CBC Top Stories',  url: 'https://rss.cbc.ca/lineup/topstories.xml',               category: 'politics',  weight: 8  },
   { id: 'toi_top',           name: 'Times of India',   url: 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms', category: 'politics', weight: 8 },
   { id: 'nikkei_asia',       name: 'Nikkei Asia',      url: 'https://asia.nikkei.com/rss/feed/nar',                  category: 'economics', weight: 9  },
   { id: 'npr_politics',      name: 'NPR Politics',     url: 'https://feeds.npr.org/1014/rss.xml',                    category: 'politics',  weight: 8  },
@@ -108,6 +108,8 @@ export const DEFAULT_NEWS_SOURCES = [
   // Sports — non-ESPN coverage
   { id: 'the_athletic',      name: 'The Athletic',     url: 'https://www.nytimes.com/athletic/rss/news/',            category: 'sports',    weight: 9  },
   { id: 'sky_sports',        name: 'Sky Sports News',  url: 'https://www.skysports.com/rss/12040',                   category: 'sports',    weight: 8  },
+  { id: 'cbs_sports',        name: 'CBS Sports',       url: 'https://www.cbssports.com/rss/headlines/',              category: 'sports',    weight: 8  },
+  { id: 'fox_sports',        name: 'Fox Sports',       url: 'https://moxie.foxnews.com/google-publisher/sports.xml', category: 'sports',    weight: 7  },
 
   // Science / space
   { id: 'bbc_science',       name: 'BBC Science & Environment', url: 'https://feeds.bbci.co.uk/news/science_and_environment/rss.xml', category: 'science', weight: 7 },
@@ -147,27 +149,30 @@ const REACTIVATE_SOURCE_IDS: string[] = [
   'openfda_food_recalls',
 ]
 
-// Sources force-disabled. India/Asia-centric feeds (skewing the feed toward
-// Indian news) + feeds that are persistently Cloudflare-blocked / unparseable
-// (tmz, ign — both 403, and redundant with other entertainment/gaming sources).
-// Rows kept for history; flip back on by removing an id here.
-const DISABLE_SOURCE_IDS: string[] = ['scmp_world', 'toi_top', 'nikkei_asia', 'tmz', 'ign']
+// Sources force-disabled. India/Asia-centric feeds (skewing toward Indian news),
+// plus feeds that are dead or unreachable from the box: tmz/ign (403), espn_top
+// (returns 202 empty — ESPN's RSS is gone; replaced by CBS/Fox Sports), and
+// cointelegraph (fetch-fails from the droplet IP; crypto stays covered by
+// CoinDesk/Decrypt/The Block/Blockworks). Rows kept for history; flip back on by
+// removing an id here.
+const DISABLE_SOURCE_IDS: string[] = ['scmp_world', 'toi_top', 'nikkei_asia', 'tmz', 'ign', 'espn_top', 'cointelegraph']
 
 export async function seedIfEmpty() {
   await syncDefaultSources()
 }
 
 export async function syncDefaultSources() {
-  // weight + category are MANAGED here: re-applied on every boot so a rebalance
-  // actually reaches a long-running DB. (The previous onConflictDoNothing meant
-  // edits to this list never propagated past a fresh install.) is_active stays
-  // under operator control — except the retired adapters below, forced off.
+  // url + name + weight + category are MANAGED here: re-applied on every boot so a
+  // rebalance OR a feed-URL fix (e.g. a moved/blocked RSS endpoint) actually
+  // reaches a long-running DB. (The previous onConflictDoNothing meant edits to
+  // this list never propagated past a fresh install.) is_active stays under
+  // operator control — except the retired adapters below, forced off.
   for (const source of DEFAULT_NEWS_SOURCES) {
     db.insert(newsSources)
       .values({ ...source, isActive: 1 })
       .onConflictDoUpdate({
         target: newsSources.id,
-        set: { weight: source.weight, category: source.category },
+        set: { url: source.url, name: source.name, weight: source.weight, category: source.category },
       })
       .run()
   }
