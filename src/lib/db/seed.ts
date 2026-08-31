@@ -22,7 +22,7 @@ export const DEFAULT_NEWS_SOURCES = [
   // High-value additions for prediction market content
   { id: 'ap_top',           name: 'AP Top News',      url: 'https://feeds.apnews.com/rss/apf-topnews',               category: 'politics',  weight: 10 },
   { id: 'ap_politics',      name: 'AP Politics',      url: 'https://feeds.apnews.com/rss/apf-politics',              category: 'politics',  weight: 10 },
-  { id: 'politico',         name: 'Politico',         url: 'https://www.politico.com/rss/politicopicks.xml',         category: 'politics',  weight: 9  },
+  { id: 'politico',         name: 'Politico',         url: 'https://rss.politico.com/politics-news.xml',              category: 'politics',  weight: 9  },
   { id: 'the_hill',         name: 'The Hill',         url: 'https://thehill.com/feed/',                              category: 'politics',  weight: 8  },
   // Al Jazeera down-weighted (10→7): a conflict-heavy wire whose front page skews
   // hard to war/geopolitics. Still on for coverage, but no longer earns the
@@ -134,6 +134,19 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'the_verge',         name: 'The Verge',        url: 'https://www.theverge.com/rss/index.xml',                category: 'tech',          weight: 8 },
   { id: 'science_daily',     name: 'Science Daily',    url: 'https://www.sciencedaily.com/rss/all.xml',              category: 'science',       weight: 8 },
   { id: 'new_scientist',     name: 'New Scientist',    url: 'https://www.newscientist.com/feed/home/',               category: 'science',       weight: 7 },
+
+  // Wire replacements. Reuters shut down feeds.reuters.com and AP shut down
+  // feeds.apnews.com — both hostnames stopped resolving, so those five sources
+  // had been failing every 5-minute tick. AP still reaches us through the
+  // existing feedx_ap mirror; Reuters has no working public feed left, so its
+  // weight is redistributed across these. Verified from the droplet with the
+  // bot's own user-agent (200 + live items) on 2026-08-31.
+  { id: 'nyt_top',          name: 'NYT Top Stories',  url: 'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml', category: 'politics',  weight: 9 },
+  { id: 'wapo_politics',    name: 'WaPo Politics',    url: 'https://feeds.washingtonpost.com/rss/politics',          category: 'politics',  weight: 9 },
+  { id: 'cbs_news',         name: 'CBS News',         url: 'https://www.cbsnews.com/latest/rss/main',                category: 'politics',  weight: 8 },
+  { id: 'nbc_news',         name: 'NBC News',         url: 'https://feeds.nbcnews.com/nbcnews/public/news',          category: 'politics',  weight: 8 },
+  { id: 'npr_news',         name: 'NPR News',         url: 'https://feeds.npr.org/1001/rss.xml',                     category: 'politics',  weight: 8 },
+  { id: 'cnbc_top',         name: 'CNBC Top News',    url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html',  category: 'economics', weight: 9 },
 ] as const
 
 // Event/alert adapters that an earlier "optimistic only" pass force-disabled.
@@ -155,7 +168,23 @@ const REACTIVATE_SOURCE_IDS: string[] = [
 // cointelegraph (fetch-fails from the droplet IP; crypto stays covered by
 // CoinDesk/Decrypt/The Block/Blockworks). Rows kept for history; flip back on by
 // removing an id here.
-const DISABLE_SOURCE_IDS: string[] = ['scmp_world', 'toi_top', 'nikkei_asia', 'tmz', 'ign', 'espn_top', 'cointelegraph']
+const DISABLE_SOURCE_IDS: string[] = [
+  // India/Asia-centric (NA/Europe focus).
+  'scmp_world', 'toi_top', 'nikkei_asia',
+  // Dead or unreachable from the box: tmz/ign (403), espn_top (202 empty —
+  // ESPN's RSS is gone, replaced by CBS/Fox Sports), cointelegraph (fetch-fails
+  // from the droplet IP; crypto stays covered by CoinDesk/Decrypt/The Block).
+  'tmz', 'ign', 'espn_top', 'cointelegraph',
+  // Retired 2026-08-31. These were failing 288 of 288 fetches a day, silently,
+  // for months — the audit log had 16.9k FETCH_FAILED rows in a week. Reuters
+  // and AP both discontinued their public RSS and the hostnames no longer
+  // resolve (DNS, not a block, so no user-agent or header fixes this). cbc_top
+  // fails the HTTP/2 handshake and axios_markets 403s. Replacements are in
+  // DEFAULT_NEWS_SOURCES above; AP is still covered via feedx_ap.
+  'reuters_world', 'reuters_politics', 'reuters_business',
+  'ap_top', 'ap_politics',
+  'cbc_top', 'axios_markets',
+]
 
 export async function seedIfEmpty() {
   await syncDefaultSources()
