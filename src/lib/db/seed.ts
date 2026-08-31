@@ -223,10 +223,15 @@ export async function syncDefaultSources() {
   // on existing DBs so operator tuning survives, so editing these only affects a
   // fresh install; change a running deployment from the dashboard or /api/settings.
   //
-  // Cadence targets ~30 posts/day. The cooldown, not the daily limit, is what
-  // actually paces this: 45 min between posts spreads 30 across the full day.
-  // The limit is the backstop. Setting a low limit WITHOUT a matching cooldown
-  // just burns the day's quota by early afternoon and then goes silent.
+  // Cadence targets ~30 posts/day, and the COOLDOWN is what delivers it: at 45
+  // min between posts the ceiling is 32/day (1440/45). daily_post_limit is only
+  // a runaway guard on LLM spend.
+  //
+  // It must sit ABOVE the cooldown-implied rate. isOverDailyLimit() is a hard
+  // stop over a ROLLING 24h window, not a per-calendar-day allowance, so a limit
+  // at or below the natural rate binds permanently: generation stops and does
+  // not resume until enough posts age out of the window. Setting it to 30 (the
+  // target) rather than above 32 (the ceiling) silenced production for hours.
   db.insert(settings)
     .values({
       id: 'singleton',
@@ -234,7 +239,7 @@ export async function syncDefaultSources() {
       marketBaseUrl: 'https://yourplatform.com/markets',
       autoGenerateThreshold: 6.5,
       postCooldownMinutes: 45,
-      dailyPostLimit: 30,
+      dailyPostLimit: 60,
       larkEnabled: 1,
       updatedAt: Date.now(),
     })
