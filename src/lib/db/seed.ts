@@ -191,15 +191,21 @@ export async function syncDefaultSources() {
     .run()
 
   // Settings singleton — threshold stays 6.5 (backtest-supported). Left untouched
-  // on existing DBs so operator tuning survives.
+  // on existing DBs so operator tuning survives, so editing these only affects a
+  // fresh install; change a running deployment from the dashboard or /api/settings.
+  //
+  // Cadence targets ~30 posts/day. The cooldown, not the daily limit, is what
+  // actually paces this: 45 min between posts spreads 30 across the full day.
+  // The limit is the backstop. Setting a low limit WITHOUT a matching cooldown
+  // just burns the day's quota by early afternoon and then goes silent.
   db.insert(settings)
     .values({
       id: 'singleton',
       platformName: 'SignalDesk',
       marketBaseUrl: 'https://yourplatform.com/markets',
       autoGenerateThreshold: 6.5,
-      postCooldownMinutes: 15,
-      dailyPostLimit: 20,
+      postCooldownMinutes: 45,
+      dailyPostLimit: 30,
       larkEnabled: 1,
       updatedAt: Date.now(),
     })
