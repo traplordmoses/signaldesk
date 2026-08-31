@@ -6,7 +6,7 @@ import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
 import { detectCategory } from '@/lib/news/scorer'
 import { marketFit } from '@/lib/markets'
 import { bucketForCategory } from '@/lib/mix'
-import { emojisForCategory } from '@/lib/emoji'
+import { enforceOneLiner } from './shape'
 
 // Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
 // counts generated_posts in the last 24h, and blocks further generation when at/over.
@@ -160,11 +160,6 @@ async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: Conten
   const safeHeadline = sanitizeForPrompt(cluster.canonicalHeadline, 240)
   const safeCategory = sanitizeForPrompt(cluster.category, 40)
 
-  // Per-story emoji palette: hand the model the SPECIFIC on-theme emoji (⚽ ₿ 🤖
-  // 🎬) for this story's category so posts stop defaulting to a bare 🟣. Prefer
-  // the finer detected category, fall back to the source category.
-  const emojiOptions = emojisForCategory(detectCategory(safeHeadline, summaryText), cluster.category)
-
   const ageMinutes = Math.round((Date.now() - cluster.firstSeenAt) / 60000)
   const modeInstruction = modeHint
     ? `You MUST use content_mode: "${modeHint}".`
@@ -176,26 +171,33 @@ Relevance score: ${(cluster.relevanceScore ?? 0).toFixed(1)}/10
 
 Headline: ${safeHeadline}
 Context/Summary: ${summaryText || '(no additional context)'}
-Category emoji for this story — REQUIRED, work in 1–2 that genuinely fit (if the set is wrong for this specific story, pick a better-fitting emoji): ${emojiOptions.join(' ')}
 Market (reviewer metadata — NEVER put a URL in the tweet): ${marketUrl}
 
 ${modeInstruction}
 
 Remember:
-- SHAPE: colored-circle alert tag + BREAKING / JUST IN / NEW (🟣 general · ⚪️ tech/science/AI · 🌪️ weather), then a crisp fact + ONE context line.
-- EMOJI MUST POP: lead like "🟣⚽ JUST IN:" — the colored circle is the alert tag, the category emoji (⚽ ₿ 🤖 🎬 🗳️) is what makes the post pop. Every post carries one, drawn from the set above. 2–3 emoji total, all purposeful — never spam, never an emoji that doesn't fit.
-- HOOK = THE POINT: this is Probly, "guess the future." Unless the story is a settled final result, end by pivoting to what's still undecided and inviting the call — a specific, take-a-side question ("Cruise or upset? 🔮", "Breakout or fakeout? 📈", "Does he name a date this week?"), never a generic "what do you think?".
-- Never casualties or gore — curiosity and stakes, never dread. Never name Polymarket or Kalshi ("Probly" is fine). No URLs. No em-dashes.
-- news_odds: lean on where the odds are moving — qualitative direction only, never invent a %. engagement: open on the stakes, then the take-a-side question.
+- SHAPE: <colored-circle tag> <LABEL>: <one sentence>. That is the whole post. 🟣 general · ⚪️ tech/science/AI · 🌪️ weather. Labels: BREAKING / JUST IN / NEW / WARNING.
+- ONE SENTENCE ONLY. No context line, no "why it matters", no second fact. State the development and stop.
+- NO HOOK. Do not end with a question or invite the reader to call it. No "?" at the end. Earlier versions of this bot did that on every post; it is retired.
+- ONE EMOJI: the colored-circle tag at the front, and nothing else. No category emoji after it, no 🔮 🧐 📈 anywhere, none at the end.
+- SHORT: aim for 120-180 characters, never over 240.
+- Never casualties or gore. Never name Polymarket or Kalshi ("Probly" is fine). No URLs. No em-dashes.
+- news_odds: same one-liner, but the fact is where the odds are moving — qualitative direction only, never invent a %.
 
 Now write one post.`
 
   // Reinforce the house style with the team's own recent picks (in-context
-  // learning from approvals) — only when we have enough, else just the static prompt.
+  // learning from approvals) — only when we have enough, else just the static
+  // prompt. Stored approvals were written under the OLD long format (category
+  // emoji, context line, prediction hook), so they're re-shaped to the current
+  // one-liner before use. Without that the few-shots demonstrate the exact
+  // format we just retired, and the model follows the examples over the prompt.
   let system = SIGNALDESK_PROMPT_V1
   const approvedExamples = getApprovedExamples()
+    .map(enforceOneLiner)
+    .filter(c => c.length >= 20)
   if (approvedExamples.length >= MIN_EXAMPLES) {
-    system += `\n\n══════════════════════════════════════\nRECENTLY APPROVED BY THE TEAM — these passed human review. Match their news judgment and topic mix, but STILL apply the emoji + hook rules above: older approved posts may predate them, so don't copy a bare-🟣, hookless style just because an example has it.\n══════════════════════════════════════\n`
+    system += `\n\n══════════════════════════════════════\nRECENTLY APPROVED BY THE TEAM — these passed human review, and are shown trimmed to the current one-line format. Match their news judgment and topic mix, and match this shape exactly: tag, label, one sentence, no hook.\n══════════════════════════════════════\n`
       + approvedExamples.map(c => `"${c}"`).join('\n')
   }
 
@@ -275,6 +277,27 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       .replace(/,\s*,/g, ', ')
       .replace(/\n+$/, '')
       .trim()
+
+    // House shape: tag + label + ONE sentence. The prompt asks for it; this
+    // guarantees it, because the model drifts back toward the old context-line
+    // + prediction-hook form. engagement is deliberately exempt — that mode IS
+    // a stakes line plus a question, it's never auto-generated, and it only
+    // runs when a reviewer asks for it explicitly from /api/posts/generate.
+    if (result.content_mode !== 'engagement') {
+      const shaped = enforceOneLiner(result.content)
+      if (shaped !== result.content) {
+        console.log(`[generate] shaped ${result.content.length}c -> ${shaped.length}c`)
+      }
+      result.content = shaped
+    }
+
+    // char_count is the model's own estimate of the text it wrote. After
+    // shaping it's stale, and it's what the Lark card and the dashboard show.
+    result.char_count = result.content.length
+
+    if (result.content.length > 280) {
+      throw new Error(`post exceeds the X limit after shaping: ${result.content.length} chars`)
+    }
 
     // Decision telemetry: capture the signals behind this draft — the relevance
     // score, the target-mix bucket, the content category, and whether it maps to
