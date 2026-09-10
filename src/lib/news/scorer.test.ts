@@ -228,3 +228,53 @@ describe('detectCategory — most-hits wins, no megacap hijack into tech_ai', ()
     })
   }
 })
+
+/**
+ * Frontier-AI priority (added 2026-09-10).
+ *
+ * AI news almost never maps to a live prediction market, so it can't earn the
+ * market boost that is otherwise the spine of the scale. Before this, the story
+ * the team asked about — Anthropic blocking bioweapons misuse attempts — scored
+ * 2.50 against a 6.5 gate and could never be drafted, however many AI sources
+ * were added. These lock in the counterweight AND its calibration: contested or
+ * developing AI stories clear the gate, routine product notes do not.
+ */
+describe('frontier-AI priority', () => {
+  const GATE = 6.5
+  const fresh = () => Date.now() - 20 * 60_000
+  const score = (h: string, s = '', w = 9) => scoreItem(h, s, w, fresh())
+
+  it('clears the gate for the story that was missed', () => {
+    const s = score(
+      'Anthropic reveals it blocked several possible attempts to use Claude for biological weapons research, including work involving gain-of-function experiments at a military institute',
+      'Anthropic said its threat intelligence team detected and blocked attempts to misuse Claude for bioweapons-related research, including gain-of-function work linked to a military institute.',
+    )
+    expect(s).toBeGreaterThanOrEqual(GATE)
+  })
+
+  it('does not treat "threat intelligence" as doom framing', () => {
+    const neutral = score('Anthropic publishes its latest safety report', 'The company detailed new findings.')
+    const jargon = score('Anthropic publishes its latest safety report', 'The company threat intelligence team detailed new findings.')
+    expect(jargon).toBe(neutral)
+  })
+
+  it('still penalises genuine doom framing', () => {
+    const calm = score('OpenAI publishes its quarterly safety report', 'Routine disclosure.')
+    const doom = score('OpenAI publishes its quarterly safety report', 'The disclosure follows a scandal and a lawsuit.')
+    expect(doom).toBeLessThan(calm)
+  })
+
+  it('clears the gate for contested and first-of-its-kind AI stories', () => {
+    expect(score('OpenAI researcher resigns over safety disagreement, publishes open letter')).toBeGreaterThanOrEqual(GATE)
+    expect(score('DeepSeek model outperforms Gemini on reasoning benchmark for the first ever time', '', 8)).toBeGreaterThanOrEqual(GATE)
+  })
+
+  it('does NOT clear the gate for routine AI product notes or passing mentions', () => {
+    expect(score('OpenAI adds a new voice option to ChatGPT', 'OpenAI announced a minor update adding a voice preset.', 8)).toBeLessThan(GATE)
+    expect(score('Retailer says it will use ChatGPT for customer service', 'A retail chain announced a customer service pilot.', 7)).toBeLessThan(GATE)
+  })
+
+  it('does not boost big-tech news that merely mentions a tech giant', () => {
+    expect(score('Apple unveils new iPhone with improved battery', 'Apple announced its new iPhone lineup.')).toBeLessThan(GATE)
+  })
+})

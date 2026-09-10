@@ -147,6 +147,28 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'nbc_news',         name: 'NBC News',         url: 'https://feeds.nbcnews.com/nbcnews/public/news',          category: 'politics',  weight: 8 },
   { id: 'npr_news',         name: 'NPR News',         url: 'https://feeds.npr.org/1001/rss.xml',                     category: 'politics',  weight: 8 },
   { id: 'cnbc_top',         name: 'CNBC Top News',    url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html',  category: 'economics', weight: 9 },
+
+  // Frontier-AI lane. Added 2026-09-10: the team wanted controversial / unique /
+  // developing AI stories from the labs themselves, and there were no primary AI
+  // sources at all — only general tech press. Verified from the droplet with the
+  // bot's own user-agent (200 + live items).
+  //
+  // Anthropic and Meta publish no usable public RSS, which is why the Google
+  // News query is here rather than two more blog feeds: it covers every lab at
+  // once and it is what surfaces the "Anthropic blocked bioweapons attempts"
+  // story the team asked about. Its titles arrive as "Headline - Publisher";
+  // fetchRssSource strips that suffix for any news.google.com source.
+  { id: 'ai_labs_news',     name: 'AI Labs (Google News)', url: 'https://news.google.com/rss/search?q=%28OpenAI+OR+Anthropic+OR+DeepMind+OR+%22Meta+AI%22%29+when:1d&hl=en-US&gl=US&ceid=US:en', category: 'tech', weight: 9 },
+  { id: 'openai_blog',      name: 'OpenAI',           url: 'https://openai.com/blog/rss.xml',                        category: 'tech',      weight: 10 },
+  { id: 'deepmind_blog',    name: 'Google DeepMind',  url: 'https://deepmind.google/blog/rss.xml',                   category: 'tech',      weight: 9 },
+  // Techmeme and HN-by-points stand in for "trending on X". X killed its free
+  // tier and now bills $0.005 per post read, so these are the free proxies for
+  // what the tech world is actually arguing about this hour.
+  { id: 'techmeme',         name: 'Techmeme',         url: 'https://www.techmeme.com/feed.xml',                      category: 'tech',      weight: 9 },
+  { id: 'hn_front',         name: 'Hacker News 100+', url: 'https://hnrss.org/frontpage?points=100',                 category: 'tech',      weight: 7 },
+  { id: 'techcrunch_ai',    name: 'TechCrunch AI',    url: 'https://techcrunch.com/category/artificial-intelligence/feed/', category: 'tech', weight: 8 },
+  { id: 'verge_ai',         name: 'The Verge AI',     url: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml', category: 'tech', weight: 8 },
+  { id: 'mit_tr_ai',        name: 'MIT Tech Review AI', url: 'https://www.technologyreview.com/topic/artificial-intelligence/feed', category: 'tech', weight: 7 },
 ] as const
 
 // Event/alert adapters that an earlier "optimistic only" pass force-disabled.

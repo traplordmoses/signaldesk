@@ -10,6 +10,15 @@ const FETCH_TIMEOUT_MS = 10000
 const SUMMARY_LIMIT = 500
 const RECENT_SOURCE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
+// Drop anything the feed itself dates older than this. Several feeds publish
+// their full archive rather than a recent window (OpenAI's returns 1,189
+// entries), and clusters are aged by first_seen_at — when WE saw the item —
+// not by publication date. Without this guard a 2023 post ingests today, looks
+// brand new to the cron, and can go out labelled JUST IN. Items with no usable
+// date are kept: toNormalizedItem defaults them to now, and dropping undated
+// items would silently kill feeds with sloppy timestamps.
+const INGEST_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
 const SOURCE_USER_AGENT = process.env.SIGNALDESK_USER_AGENT
   ?? `SignalDeskBot/1.0 (${process.env.NEXT_PUBLIC_APP_URL ?? 'local development'})`
 
@@ -224,6 +233,7 @@ function toNormalizedItem(
   const title = cleanText(input.title)
   const url = input.url.trim()
   if (!title || !url) return null
+  if (input.publishedAt != null && Date.now() - input.publishedAt > INGEST_MAX_AGE_MS) return null
 
   const normalizedUrl = normalizeUrl(url)
   return {
@@ -245,12 +255,20 @@ async function fetchRssSource(source: SourceRecord): Promise<NormalizedItem[]> {
   const feed = await parser.parseString(xml)
   const items: NormalizedItem[] = []
 
+  // Google News titles arrive as "Headline - Publisher". Only the market-driven
+  // adapter used to strip that, so a Google News feed configured as an ordinary
+  // source would put " - TechCrunch" inside the tweet text.
+  const isGoogleNews = (() => {
+    try { return new URL(source.url).hostname.endsWith('news.google.com') } catch { return false }
+  })()
+
   for (const entry of (feed.items ?? []) as RssEntry[]) {
     const rawUrl = entry.link ?? entry.guid ?? ''
     if (!rawUrl) continue
 
+    const rawTitle = entry.title ?? ''
     const item = toNormalizedItem(source, {
-      title: entry.title ?? '',
+      title: isGoogleNews ? parseGoogleNewsTitle(rawTitle).title : rawTitle,
       summary: entry.contentSnippet ?? entry.summary ?? entry.content ?? '',
       url: absoluteUrl(rawUrl, source.url),
       publishedAt: parseTimestamp(entry.isoDate ?? entry.pubDate ?? entry.updated),

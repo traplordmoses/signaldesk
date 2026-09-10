@@ -207,6 +207,42 @@ const GORE = [
   'murdered', 'murder', 'genocide', 'mass grave', 'execution', 'victims',
 ]
 
+// AI labs and frontier models. Named separately from the tech_ai CATEGORY
+// keywords (which also carry Apple/Microsoft/Tesla and fire on ordinary
+// big-tech business news) so the boost lands on actual frontier-AI stories.
+// Deliberately excludes 'nvidia', 'google' and 'meta' — those hit on chip and
+// ad-business news far more often than on AI news.
+const AI_LABS = [
+  'openai', 'anthropic', 'claude', 'chatgpt', 'gpt-4', 'gpt-5', 'deepmind',
+  'gemini', 'meta ai', 'llama', 'mistral', 'xai', 'grok', 'deepseek',
+  'perplexity', 'sora', 'midjourney', 'stability ai', 'hugging face', 'copilot',
+  'frontier model', 'frontier lab',
+]
+
+// The "controversial / unique / DEVELOPING" half of the ask. An AI story that
+// is merely a product note scores lower than one that is contested, unsafe,
+// legal, or a genuine first.
+const AI_DEVELOPING = [
+  'reveals', 'unveils', 'blocked', 'blocks', 'safety', 'jailbreak', 'misuse',
+  'lawsuit', 'sues', 'sued', 'open letter', 'resigns', 'whistleblower', 'leaked',
+  'benchmark', 'red team', 'bioweapon', 'biological weapons', 'gain-of-function',
+  'regulate', 'executive order', 'superintelligence', 'agi', 'shuts down',
+  'training run', 'first ever', 'breakthrough', 'outperforms', 'deprecat',
+]
+
+// Weighted toward the DEVELOPING half deliberately. A flat +3 for naming a lab
+// let routine product notes ("OpenAI adds a new voice option") clear the gate at
+// 7.0, which is not what was asked for. 2 + 2 keeps a bare product note just
+// under and lets contested, legal, safety or first-of-its-kind stories through.
+const AI_LAB_BOOST = 2
+const AI_DEVELOPING_BOOST = 2
+
+// Security jargon that trips the SOFT_NEGATIVE doom penalty without being doom.
+// "Anthropic's threat intelligence team blocked…" is a newsworthy AI story, and
+// docking it 2 points for the word 'threat' is what kept it under the gate.
+const BENIGN_NEGATIVE_PHRASES =
+  /\bthreat (intelligence|actor|actors|model|modeling|modelling|report|landscape|research)\b/g
+
 // Priority companies + indices the audience cares about during earnings
 // season and big macro days. Headlines mentioning any of these get a +1.5
 // score bump on top of the base scoring. Both common names ("apple",
@@ -385,10 +421,13 @@ export function scoreItem(title: string, summary: string, weight: number, publis
   // 2) Anticipation — forward-looking framing, +1 per phrase, cap +2.
   const anticipation = countHits(text, ANTICIPATION, 2)
 
-  // 3) Valence — optimism reward minus soft-negative / gore penalties.
+  // 3) Valence — optimism reward minus soft-negative / gore penalties. Benign
+  //    security jargon is stripped first so 'threat intelligence' doesn't read
+  //    as doom framing.
+  const valenceText = text.replace(BENIGN_NEGATIVE_PHRASES, ' ')
   let valence = countHits(text, POSITIVE, 2)
-  if (anyHit(text, SOFT_NEGATIVE)) valence -= 2
-  if (anyHit(text, GORE)) valence -= 4
+  if (anyHit(valenceText, SOFT_NEGATIVE)) valence -= 2
+  if (anyHit(valenceText, GORE)) valence -= 4
 
   // 4) Source credibility.
   let source = 0
@@ -427,7 +466,19 @@ export function scoreItem(title: string, summary: string, weight: number, publis
     // markets module not available — no market signal, continue
   }
 
-  let score = categoryFit + anticipation + valence + source + ticker + recency + marketBoost
+  // 8) Frontier-AI priority. AI news almost never maps to a live market, so it
+  //    can't earn the market boost that is otherwise the spine of this scale,
+  //    and it was landing ~2-4 against a 6.5 gate however good the story. This
+  //    is the counterweight the team asked for: named lab, plus a little more
+  //    when the story is contested or genuinely developing rather than a
+  //    routine product note.
+  let aiBoost = 0
+  if (anyHit(text, AI_LABS)) {
+    aiBoost = AI_LAB_BOOST
+    if (anyHit(text, AI_DEVELOPING)) aiBoost += AI_DEVELOPING_BOOST
+  }
+
+  let score = categoryFit + anticipation + valence + source + ticker + recency + marketBoost + aiBoost
 
   // Local-crime penalty — applied AFTER all bonuses so it docks the final
   // composite score. Capped at one penalty per article.
