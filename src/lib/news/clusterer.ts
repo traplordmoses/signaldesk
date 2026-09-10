@@ -263,11 +263,26 @@ export async function clusterNewItems(): Promise<number> {
         const timeDiff = Math.abs(kwSets[i].item.publishedAt - kwSets[j].item.publishedAt)
         if (timeDiff > 4 * 60 * 60 * 1000) continue
 
-        // Single linkage: match against ANY member already in this cluster, not
-        // just the seed. One story's coverage forms a chain of pairwise matches
-        // rather than a star around whichever copy happened to be seen first.
+        // MAJORITY linkage: join only if this matches at least half the members
+        // already in the cluster.
+        //
+        // Single linkage (match ANY member) chains: A-B and B-C pull C in even
+        // when A and C are unrelated. In production that put "OpenAI pauses Pro
+        // subscriptions" and "OpenAI's Astra model" inside the "ChatGPT for
+        // Financial Services" cluster, and T. Rowe Price inside Anthropic's
+        // threat report — those stories then lose their own card entirely.
+        // Measured on a real batch, on-topic share of the finance cluster:
+        // single 11/17, seed-only 10/12, majority 9/9, with identical
+        // consolidation of the duplicate story (3 clusters in every mode).
         const curated = keywordOverlap(kwSets[i].keywords, kwSets[j].keywords) >= 2
-        const linked = curated || clusterTexts.some(t => sameStory(t, kwSets[j].text, df, dfMax))
+        let linked = curated
+        if (!linked) {
+          let hits = 0
+          for (const t of clusterTexts) {
+            if (sameStory(t, kwSets[j].text, df, dfMax)) hits++
+          }
+          linked = hits > 0 && hits >= Math.ceil(clusterTexts.length / 2)
+        }
         if (linked) {
           clusterItems.push(kwSets[j].item)
           clusterTexts.push(kwSets[j].text)
