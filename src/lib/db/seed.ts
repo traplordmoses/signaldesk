@@ -223,9 +223,10 @@ export async function syncDefaultSources() {
   // on existing DBs so operator tuning survives, so editing these only affects a
   // fresh install; change a running deployment from the dashboard or /api/settings.
   //
-  // Cadence targets ~30 posts/day, and the COOLDOWN is what delivers it: at 45
-  // min between posts the ceiling is 32/day (1440/45). daily_post_limit is only
-  // a runaway guard on LLM spend.
+  // Cadence targets ~45 posts/day, and the COOLDOWN is what delivers it: at 30
+  // min between posts the ceiling is 48/day (1440/30), and cycles with no
+  // qualifying candidate mean the real figure lands a little under that.
+  // daily_post_limit is only a runaway guard on LLM spend.
   //
   // It must sit ABOVE the cooldown-implied rate. isOverDailyLimit() is a hard
   // stop over a ROLLING 24h window, not a per-calendar-day allowance, so a limit
@@ -238,8 +239,8 @@ export async function syncDefaultSources() {
       platformName: 'SignalDesk',
       marketBaseUrl: 'https://yourplatform.com/markets',
       autoGenerateThreshold: 6.5,
-      postCooldownMinutes: 45,
-      dailyPostLimit: 60,
+      postCooldownMinutes: 30,
+      dailyPostLimit: 70,
       larkEnabled: 1,
       updatedAt: Date.now(),
     })

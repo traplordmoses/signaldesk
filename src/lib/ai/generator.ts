@@ -6,7 +6,7 @@ import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
 import { detectCategory } from '@/lib/news/scorer'
 import { marketFit } from '@/lib/markets'
 import { bucketForCategory } from '@/lib/mix'
-import { enforceOneLiner } from './shape'
+import { enforceOneLiner, tagForCategory } from './shape'
 
 // Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
 // counts generated_posts in the last 24h, and blocks further generation when at/over.
@@ -159,6 +159,7 @@ async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: Conten
 
   const safeHeadline = sanitizeForPrompt(cluster.canonicalHeadline, 240)
   const safeCategory = sanitizeForPrompt(cluster.category, 40)
+  const storyTag = tagForCategory(detectCategory(safeHeadline, summaryText), cluster.category)
 
   const ageMinutes = Math.round((Date.now() - cluster.firstSeenAt) / 60000)
   const modeInstruction = modeHint
@@ -171,15 +172,16 @@ Relevance score: ${(cluster.relevanceScore ?? 0).toFixed(1)}/10
 
 Headline: ${safeHeadline}
 Context/Summary: ${summaryText || '(no additional context)'}
+Brand dot for this story — use EXACTLY this one, no other coloured circle: ${storyTag}
 Market (reviewer metadata — NEVER put a URL in the tweet): ${marketUrl}
 
 ${modeInstruction}
 
 Remember:
-- SHAPE: <colored-circle tag> <LABEL>: <one sentence>. That is the whole post. 🟣 general · ⚪️ tech/science/AI · 🌪️ weather. Labels: BREAKING / JUST IN / NEW / WARNING.
+- SHAPE: <brand dot> <LABEL>: <one sentence>. That is the whole post. Use the dot given above, never a different coloured circle. Labels: BREAKING / JUST IN / NEW / WARNING.
 - ONE SENTENCE ONLY. No context line, no "why it matters", no second fact. State the development and stop.
 - NO HOOK. Do not end with a question or invite the reader to call it. No "?" at the end. Earlier versions of this bot did that on every post; it is retired.
-- ONE EMOJI: the colored-circle tag at the front, and nothing else. No category emoji after it, no 🔮 🧐 📈 anywhere, none at the end.
+- ONE EMOJI: the brand dot at the front, and nothing else. No category emoji after it, no 🔮 🧐 📈 anywhere, none at the end.
 - SHORT: aim for 120-180 characters, never over 240.
 - Never casualties or gore. Never name Polymarket or Kalshi ("Probly" is fine). No URLs. No em-dashes.
 - news_odds: same one-liner, but the fact is where the odds are moving — qualitative direction only, never invent a %.
@@ -194,7 +196,7 @@ Now write one post.`
   // format we just retired, and the model follows the examples over the prompt.
   let system = SIGNALDESK_PROMPT_V1
   const approvedExamples = getApprovedExamples()
-    .map(enforceOneLiner)
+    .map(c => enforceOneLiner(c))   // arity: never pass .map's index as forcedTag
     .filter(c => c.length >= 20)
   if (approvedExamples.length >= MIN_EXAMPLES) {
     system += `\n\n══════════════════════════════════════\nRECENTLY APPROVED BY THE TEAM — these passed human review, and are shown trimmed to the current one-line format. Match their news judgment and topic mix, and match this shape exactly: tag, label, one sentence, no hook.\n══════════════════════════════════════\n`
@@ -278,13 +280,22 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       .replace(/\n+$/, '')
       .trim()
 
+    // Content category drives both the brand dot and the telemetry below.
+    let signalSummary = ''
+    try { signalSummary = (JSON.parse(cluster.constituentSummaries ?? '[]') as string[]).join(' ') } catch { /* keep '' */ }
+    const contentCategory = detectCategory(cluster.canonicalHeadline, signalSummary)
+
     // House shape: tag + label + ONE sentence. The prompt asks for it; this
     // guarantees it, because the model drifts back toward the old context-line
     // + prediction-hook form. engagement is deliberately exempt — that mode IS
     // a stakes line plus a question, it's never auto-generated, and it only
     // runs when a reviewer asks for it explicitly from /api/posts/generate.
+    //
+    // The dot is FORCED from the story's category rather than trusted from the
+    // model, so category colours are consistent instead of approximate.
     if (result.content_mode !== 'engagement') {
-      const shaped = enforceOneLiner(result.content)
+      const tag = tagForCategory(contentCategory, cluster.category)
+      const shaped = enforceOneLiner(result.content, tag)
       if (shaped !== result.content) {
         console.log(`[generate] shaped ${result.content.length}c -> ${shaped.length}c`)
       }
@@ -304,9 +315,6 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
     // a live market — stored alongside the post so that joining signals → status
     // (approved / rejected / posted) teaches us what the team actually wants. All
     // cheap + synchronous (string/keyword matching + an in-memory market lookup).
-    let signalSummary = ''
-    try { signalSummary = (JSON.parse(cluster.constituentSummaries ?? '[]') as string[]).join(' ') } catch { /* keep '' */ }
-    const contentCategory = detectCategory(cluster.canonicalHeadline, signalSummary)
     const fit = marketFit(cluster.canonicalHeadline, signalSummary)
     const bucket = bucketForCategory(contentCategory, cluster.category)
     const signals = JSON.stringify({

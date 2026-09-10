@@ -13,16 +13,40 @@
 // few-shots are in play. So we also enforce it deterministically here. This is
 // the last thing that touches draft text before it's stored and sent to Lark.
 
-// Colored-circle alert tags, in canonical output form.
-const TAG_GENERAL = '\u{1F7E3}'          // 🟣 politics, sports, finance, world
-const TAG_TECH = '\u{26AA}\u{FE0F}'      // ⚪️ tech / science / AI
-const TAG_WEATHER = '\u{1F32A}\u{FE0F}'  // 🌪️ weather & alerts
+// Brand alert dots, in canonical output form. THIS IS THE WHOLE PALETTE — the
+// team picked these because they are the brand colors, so do not invent others.
+// One dot per post, always the first character.
+const TAG_GENERAL = '\u{1F7E3}'           // 🟣 default: sports, tech/AI, economics, culture, science
+const TAG_CRYPTO = '\u{26AA}\u{FE0F}'      // ⚪️ crypto
+const TAG_POLITICS = '\u{26AB}\u{FE0F}'    // ⚫️ politics, elections, geopolitics
+const TAG_WEATHER = '\u{1F32A}\u{FE0F}'    // 🌪️ weather & alerts
 
-// Leading run of emoji + whitespace, e.g. "🟣⚾ " or "🟣🏛️ ". Includes the
-// variation selector, ZWJ and skin-tone modifiers so multi-codepoint emoji
-// (🏛️ = U+1F3DB U+FE0F) are consumed whole rather than leaving a stray VS16.
+/**
+ * The dot a story should carry, from its scorer content-category (preferred)
+ * with the feed's own category as fallback. The generator resolves this and
+ * passes it to enforceOneLiner, so the colour is derived from the story rather
+ * than from whatever the model happened to type.
+ */
+export function tagForCategory(contentCategory: string | null, sourceCategory = ''): string {
+  const c = contentCategory ?? sourceCategory
+  if (c === 'crypto') return TAG_CRYPTO
+  if (c === 'politics' || c === 'elections' || c === 'geopolitics') return TAG_POLITICS
+  if (c === 'weather') return TAG_WEATHER
+  return TAG_GENERAL
+}
+
+// Leading run of emoji/symbols + whitespace, e.g. "🟣⚾ ", "🟣🏛️ " or "🟣₿ ".
+// Includes the variation selector, ZWJ and skin-tone modifiers so multi-codepoint
+// emoji (🏛️ = U+1F3DB U+FE0F) are consumed whole rather than leaving a stray VS16.
+//
+// \p{S} covers the symbol marks that are NOT Extended_Pictographic and would
+// otherwise survive the trim: ₿ (U+20BF) is a currency symbol, ◎ is So. Ξ is
+// listed by hand because it is a Greek capital LETTER, so no symbol class
+// catches it and widening this to letters would eat the label. Safe to consume
+// greedily here because a well-formed post continues with the LABEL, which is
+// letters, and that terminates the run.
 const LEAD_EMOJI_RUN =
-  /^[\s\p{Extended_Pictographic}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}\u{20E3}]+/u
+  /^[\s\p{Extended_Pictographic}\p{S}\u{039E}\u{FE0F}\u{200D}\u{1F3FB}-\u{1F3FF}\u{20E3}]+/u
 
 // Trailing emoji (plus any whitespace) — strips a dangling 🔮 / 🧐 / 📈 off a
 // draft that never closed its sentence with punctuation.
@@ -89,7 +113,7 @@ function firstSentenceEnd(text: string): number {
  * which is what lets us also run it over stored approved posts before they're
  * used as few-shot examples.
  */
-export function enforceOneLiner(content: string): string {
+export function enforceOneLiner(content: string, forcedTag?: string): string {
   const text = String(content ?? '').replace(/\s+/g, ' ').trim()
   if (text === '') return ''
 
@@ -98,9 +122,15 @@ export function enforceOneLiner(content: string): string {
   const lead = text.match(LEAD_EMOJI_RUN)?.[0] ?? ''
   const body = text.slice(lead.length).trim()
 
-  let tag = TAG_GENERAL
-  if (lead.includes('\u{26AA}')) tag = TAG_TECH
-  else if (lead.includes('\u{1F32A}')) tag = TAG_WEATHER
+  // A forced tag (the generator's, derived from the story) always wins. Without
+  // one we preserve whatever dot is already there, which is what makes this
+  // idempotent over already-shaped text and stored approved posts.
+  let tag = forcedTag ?? TAG_GENERAL
+  if (!forcedTag) {
+    if (lead.includes('\u{26AB}')) tag = TAG_POLITICS
+    else if (lead.includes('\u{26AA}')) tag = TAG_CRYPTO
+    else if (lead.includes('\u{1F32A}')) tag = TAG_WEATHER
+  }
 
   // Keep only the first sentence of the body. No boundary means the model
   // wrote a single unterminated line — keep it, minus any trailing emoji.

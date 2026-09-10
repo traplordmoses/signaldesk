@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { enforceOneLiner } from './shape'
+import { enforceOneLiner, tagForCategory } from './shape'
 
 describe('enforceOneLiner', () => {
   // The three real drafts the team re-edited by hand, with their edits as the
@@ -30,11 +30,37 @@ describe('enforceOneLiner', () => {
     expect(enforceOneLiner(shaped)).toBe(shaped)
   })
 
-  it('keeps the tech tag', () => {
+  it('preserves an existing dot when no tag is forced', () => {
     const draft = '⚪️🤖 NEW: Micron just inked a memory and storage supply deal with Anthropic, locking in AI demand. Who is the next chipmaker to land a frontier lab?'
     expect(enforceOneLiner(draft)).toBe(
       '⚪️ NEW: Micron just inked a memory and storage supply deal with Anthropic, locking in AI demand.'
     )
+  })
+
+  it('a forced dot overrides whatever the model typed', () => {
+    const draft = '⚪️ JUST IN: The House passed the spending bill. It now goes to the Senate.'
+    expect(enforceOneLiner(draft, tagForCategory('politics'))).toBe(
+      '⚫️ JUST IN: The House passed the spending bill.'
+    )
+  })
+
+  it('forces the crypto dot onto a crypto story', () => {
+    const draft = '🟣₿ JUST IN: Solana fees hit record highs as validators accelerate inflation cuts. Breakout or fakeout? 📈'
+    expect(enforceOneLiner(draft, tagForCategory('crypto'))).toBe(
+      '⚪️ JUST IN: Solana fees hit record highs as validators accelerate inflation cuts.'
+    )
+  })
+
+  it('strips non-pictographic category marks like the bitcoin and xi signs', () => {
+    expect(enforceOneLiner('🟣₿ JUST IN: Bitcoin cleared 90k.', tagForCategory('crypto')))
+      .toBe('⚪️ JUST IN: Bitcoin cleared 90k.')
+    expect(enforceOneLiner('🟣Ξ NEW: Ethereum finalised the upgrade.', tagForCategory('crypto')))
+      .toBe('⚪️ NEW: Ethereum finalised the upgrade.')
+  })
+
+  it('recognises the politics dot on already-shaped text', () => {
+    const shaped = '⚫️ BREAKING: Trump says the U.S. has secured majority control of Venezuelan oil reserves.'
+    expect(enforceOneLiner(shaped)).toBe(shaped)
   })
 
   it('keeps the weather tag', () => {
@@ -62,5 +88,22 @@ describe('enforceOneLiner', () => {
 
   it('handles empty input', () => {
     expect(enforceOneLiner('')).toBe('')
+  })
+
+  it('maps every category to a brand dot, and nothing outside the palette', () => {
+    expect(tagForCategory('crypto')).toBe('⚪️')
+    expect(tagForCategory('politics')).toBe('⚫️')
+    expect(tagForCategory('elections')).toBe('⚫️')
+    expect(tagForCategory('geopolitics')).toBe('⚫️')
+    expect(tagForCategory('weather')).toBe('🌪️')
+    // everything else falls back to the default dot
+    for (const c of ['tech_ai', 'sports', 'economy_finance', 'pop_culture', 'space', 'health_science', null]) {
+      expect(tagForCategory(c)).toBe('🟣')
+    }
+    // the palette is closed: only these four ever come out
+    const palette = new Set(['🟣', '⚪️', '⚫️', '🌪️'])
+    for (const c of ['crypto', 'politics', 'weather', 'sports', 'gibberish', null]) {
+      expect(palette.has(tagForCategory(c))).toBe(true)
+    }
   })
 })
