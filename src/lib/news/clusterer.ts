@@ -70,6 +70,124 @@ export function topicalTokens(text: string): Set<string> {
   return out
 }
 
+
+// ── Same-story detection ────────────────────────────────────────────────────
+//
+// The curated-keyword rule below (2+ shared TIER1/TIER2 keywords) misses the
+// common case entirely: one story covered by many outlets. "Anthropic says it
+// blocked bioweapons research" shares exactly ONE curated keyword ('anthropic')
+// with its own coverage, so eight outlets produced eight separate cards.
+//
+// Plain token overlap can't fix it on its own, because it cannot tell "same
+// event, different wording" from "same template, different entities" — "Trump
+// tariffs on Chinese steel" and "Trump tariffs on Mexican avocado" share four
+// tokens and are different stories. Two signals do separate them:
+//
+//   1. DISTINCTIVENESS. Weight shared tokens by how rare they are in the current
+//      batch. Measured on live production data: 'anthropic' appeared in 15% of a
+//      365-item batch and 'openai' in 12%, so sharing those means little, while
+//      'biological' (3%) and 'bioweapons' (1%) genuinely pin down one story.
+//   2. ENTITY DIVERGENCE. If each headline names a proper noun the other does
+//      not, they are about different subjects however much boilerplate they
+//      share. This is what rejects the tariff and football-scoreline traps.
+//
+// Calibrated against a real batch: 59/105 true pairs merge, 0/120 false pairs,
+// and all three template traps are rejected. Single-linkage below turns those
+// 59 edges into one component.
+
+// Shared tokens rarer than this share of the batch count as distinctive.
+const DISTINCTIVE_DF_RATIO = 0.08
+const MIN_DISTINCTIVE_SHARED = 2
+const MIN_OVERLAP_COEF = 0.25
+
+// Capitalised words that carry no entity signal.
+const CAP_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'but', 'for', 'of', 'in', 'on', 'at', 'to', 'with',
+  'from', 'by', 'as', 'is', 'are', 'it', 'its', 'this', 'that', 'new', 'how',
+  'why', 'what', 'when', 'says', 'said', 'after', 'over', 'his', 'her', 'their',
+])
+
+/**
+ * Proper-noun proxy: capitalised words that aren't sentence-initial.
+ *
+ * Returns EMPTY for predominantly Title Case headlines, where capitalisation
+ * carries no information — better to fall back to token overlap alone than to
+ * treat every word as an entity. Parenthetical attributions are stripped first
+ * because Techmeme appends "(Dustin Volz/New York Times)" to its titles.
+ *
+ * The FIRST word counts. Sentence-initial capitalisation is automatic, so it is
+ * weak evidence, but news headlines lead with their subject far more often than
+ * not ("Anthropic says…", "Trump announces…"). Excluding it meant "Anthropic
+ * blocks X" and "OpenAI blocks X" showed no entity divergence at all and could
+ * merge into one cluster. Common leading words are handled by CAP_STOPWORDS.
+ */
+export function properNouns(text: string): Set<string> {
+  const words = text.replace(/\([^)]*\)/g, ' ').split(/[^A-Za-z0-9\u2019']+/).filter(Boolean)
+  if (words.length < 3) return new Set()
+
+  // Title Case is judged on words AFTER the first. The leading word is
+  // capitalised in every style, so counting it as evidence of Title Case wrongly
+  // flags short sentence-case headlines and switches the entity guard off.
+  const rest = words.slice(1)
+  const cappedRest = rest.filter(w => /^[A-Z]/.test(w))
+  if (rest.length > 0 && cappedRest.length / rest.length > 0.6) return new Set()
+
+  const capped = words.filter(w => /^[A-Z]/.test(w))
+  return new Set(capped.map(w => w.toLowerCase()).filter(w => !CAP_STOPWORDS.has(w)))
+}
+
+/** Token -> number of texts containing it. */
+export function buildDocFrequency(texts: string[]): Map<string, number> {
+  const df = new Map<string, number>()
+  for (const t of texts) {
+    for (const tok of topicalTokens(t)) df.set(tok, (df.get(tok) ?? 0) + 1)
+  }
+  return df
+}
+
+/**
+ * Do these two texts describe the same event? See the block comment above for
+ * why both signals are needed. `dfMax` is the distinctiveness cutoff, derived
+ * from the batch size by the caller.
+ */
+export function sameStory(
+  a: string,
+  b: string,
+  df: Map<string, number>,
+  dfMax: number,
+): boolean {
+  const A = topicalTokens(a)
+  const B = topicalTokens(b)
+  if (A.size === 0 || B.size === 0) return false
+
+  let shared = 0
+  let distinctiveShared = 0
+  for (const tok of A) {
+    if (!B.has(tok)) continue
+    shared++
+    if ((df.get(tok) ?? 1) <= dfMax) distinctiveShared++
+  }
+  if (distinctiveShared < MIN_DISTINCTIVE_SHARED) return false
+  if (shared / Math.min(A.size, B.size) < MIN_OVERLAP_COEF) return false
+
+  // Entity divergence: each side naming a proper noun the other lacks means
+  // different subjects, however much phrasing they share.
+  const pa = properNouns(a)
+  const pb = properNouns(b)
+  if (pa.size > 0 && pb.size > 0) {
+    let aOnly = false
+    let bOnly = false
+    for (const w of pa) if (!pb.has(w)) { aOnly = true; break }
+    for (const w of pb) if (!pa.has(w)) { bOnly = true; break }
+    if (aOnly && bOnly) return false
+  }
+  return true
+}
+
+export function distinctivenessCutoff(batchSize: number): number {
+  return Math.max(3, Math.round(batchSize * DISTINCTIVE_DF_RATIO))
+}
+
 // Window for merging a freshly-clustered batch into an existing recent cluster
 // within the same category. Without this, the same breaking story spawns a new
 // cluster every 5-min cron tick: cluster A's items get isProcessed=1, then a
@@ -105,21 +223,28 @@ export async function clusterNewItems(): Promise<number> {
 
   if (unprocessed.length === 0) return 0
 
-  // Group by category first
-  const byCategory = new Map<string, typeof unprocessed>()
-  for (const item of unprocessed) {
-    const cat = item.category
-    if (!byCategory.has(cat)) byCategory.set(cat, [])
-    byCategory.get(cat)!.push(item)
-  }
+  // NOT partitioned by source category any more. Category here is the FEED's
+  // desk, not the story's subject, so the same event covered by Politico and by
+  // TechCrunch landed in different partitions and could never merge — which is
+  // exactly what happened to the Anthropic bioweapons story. Story identity
+  // should not depend on whose desk covered it. The cluster takes its category
+  // from its canonical (highest-scoring) item instead.
+  const groups: [string, typeof unprocessed][] = [['all', unprocessed]]
+
+  // Distinctiveness is measured against THIS batch, so the cutoff adapts to what
+  // is ambient right now: during a wave of AI coverage 'anthropic' stops being
+  // a useful signal on its own, while 'bioweapons' still pins down one story.
+  const df = buildDocFrequency(unprocessed.map(it => it.title + ' ' + (it.summary ?? '')))
+  const dfMax = distinctivenessCutoff(unprocessed.length)
 
   let clustersCreated = 0
 
-  for (const [category, items] of byCategory) {
+  for (const [, items] of groups) {
     // Build keyword sets
     const kwSets = items.map(item => ({
       item,
       keywords: extractKeywords(item.title + ' ' + (item.summary ?? '')),
+      text: item.title + ' ' + (item.summary ?? ''),
     }))
 
     const assigned = new Set<string>()
@@ -128,6 +253,7 @@ export async function clusterNewItems(): Promise<number> {
       if (assigned.has(kwSets[i].item.id)) continue
 
       const clusterItems = [kwSets[i].item]
+      const clusterTexts = [kwSets[i].text]
       assigned.add(kwSets[i].item.id)
 
       for (let j = i + 1; j < kwSets.length; j++) {
@@ -137,10 +263,14 @@ export async function clusterNewItems(): Promise<number> {
         const timeDiff = Math.abs(kwSets[i].item.publishedAt - kwSets[j].item.publishedAt)
         if (timeDiff > 4 * 60 * 60 * 1000) continue
 
-        // Must share 2+ tier1/tier2 keywords
-        const overlap = keywordOverlap(kwSets[i].keywords, kwSets[j].keywords)
-        if (overlap >= 2) {
+        // Single linkage: match against ANY member already in this cluster, not
+        // just the seed. One story's coverage forms a chain of pairwise matches
+        // rather than a star around whichever copy happened to be seen first.
+        const curated = keywordOverlap(kwSets[i].keywords, kwSets[j].keywords) >= 2
+        const linked = curated || clusterTexts.some(t => sameStory(t, kwSets[j].text, df, dfMax))
+        if (linked) {
           clusterItems.push(kwSets[j].item)
+          clusterTexts.push(kwSets[j].text)
           assigned.add(kwSets[j].item.id)
         }
       }
@@ -150,6 +280,7 @@ export async function clusterNewItems(): Promise<number> {
         (cur.relevanceScore ?? 0) > (best.relevanceScore ?? 0) ? cur : best
       )
 
+      const category = canonical.category
       const maxScore = canonical.relevanceScore ?? 0
       const riskLevels = clusterItems.map(it => it.riskLevel ?? 'low')
       const riskLevel = riskLevels.includes('high') ? 'high'
@@ -175,15 +306,12 @@ export async function clusterNewItems(): Promise<number> {
         }
       }
 
+      // Same reasoning as above: no category filter. A tech-desk copy of a story
+      // must be able to merge into the politics-desk cluster that already exists.
       const mergeCutoff = now - RECENT_MERGE_WINDOW_MS
       const recentClusters = db.select()
         .from(eventClusters)
-        .where(
-          and(
-            eq(eventClusters.category, category),
-            gt(eventClusters.firstSeenAt, mergeCutoff),
-          )
-        )
+        .where(gt(eventClusters.firstSeenAt, mergeCutoff))
         .all()
 
       let mergedInto: typeof recentClusters[number] | null = null
@@ -191,7 +319,11 @@ export async function clusterNewItems(): Promise<number> {
         let existingSummaries: string[] = []
         try { existingSummaries = JSON.parse(existing.constituentSummaries ?? '[]') } catch { /* keep [] */ }
         const existingText = existing.canonicalHeadline + ' ' + existingSummaries.join(' ')
-        if (shouldMergeIntoExisting(candidateKw, existingText)) {
+        const candidateText = clusterTexts.join(' ')
+        if (
+          shouldMergeIntoExisting(candidateKw, existingText) ||
+          sameStory(candidateText, existingText, df, dfMax)
+        ) {
           mergedInto = existing
           break
         }

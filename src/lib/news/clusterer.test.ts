@@ -6,7 +6,7 @@
  * last 60 minutes.
  */
 import { describe, it, expect } from 'vitest'
-import { shouldMergeIntoExisting, topicalTokens, keywordOverlap } from './clusterer'
+import { shouldMergeIntoExisting, topicalTokens, keywordOverlap, sameStory, properNouns, buildDocFrequency, distinctivenessCutoff } from './clusterer'
 import { getTier1And2Keywords } from './scorer'
 
 function kwSet(text: string): Set<string> {
@@ -84,5 +84,96 @@ describe('topicalTokens dedup — same-entity twins caught, distinct stories spa
       'Lionel Messi broke the World Cup all-time scoring record',
       'Dallas Mavericks hiring Michigan coach Dusty May from college ranks',
     )).toBe(false)
+  })
+})
+
+/**
+ * Same-story detection (added 2026-09-10).
+ *
+ * The bug: one story covered by many outlets produced one card per outlet. The
+ * Anthropic bioweapons story generated EIGHT separate clusters in two hours,
+ * because coverage of it shares exactly one curated keyword ('anthropic').
+ *
+ * The headlines below are verbatim from production. The traps are the reason
+ * plain token overlap isn't enough: "same template, different entities" shares
+ * as many tokens as "same event, different wording".
+ */
+describe('sameStory — one event, many outlets', () => {
+  const BIO = [
+    'Anthropic says scientists used AI for possible biological weapons development',
+    'Anthropic sounds alarm on AI models being misused to develop biological weapons',
+    'Anthropic says scientists used its AI for research that could aid biological weapons development',
+    'Anthropic says It disrupted attempts to misuse AI for biological weapons research',
+    'Anthropic blocks accounts of several scientists after detecting research with potential to develop biological weapons',
+  ]
+  // Ambient corpus so 'anthropic' is common and 'biological' is distinctive,
+  // which is the situation during a wave of AI coverage.
+  // Sized like a real fetch batch (~130 items). Distinctiveness is a RATIO of
+  // batch size, so a toy corpus makes 'biological' itself look common and the
+  // test measures nothing.
+  const CORPUS = [
+    ...BIO,
+    ...Array.from({ length: 23 }, (_, i) => `Anthropic announces unrelated business item number ${i} about hiring`),
+    ...Array.from({ length: 100 }, (_, i) => `Unrelated market story number ${i} covering shipping and freight rates`),
+    'Scoop: Anthropic whistleblower gave up his equity to leave the company',
+    'Anthropic Drops Stark AI Forecast for U.S. Economy',
+    'Emil Michael stands by Anthropic blacklist',
+  ]
+  const df = buildDocFrequency(CORPUS)
+  const dfMax = distinctivenessCutoff(CORPUS.length)
+  const same = (a: string, b: string) => sameStory(a, b, df, dfMax)
+
+  it('merges coverage of the same event across outlets', () => {
+    const pairs = BIO.flatMap((a, i) => BIO.slice(i + 1).map(b => [a, b] as const))
+    const merged = pairs.filter(([a, b]) => same(a, b)).length
+    // Not every pair links directly; single linkage chains them into one cluster.
+    expect(merged).toBeGreaterThanOrEqual(pairs.length / 2)
+  })
+
+  it('does not merge different Anthropic stories that merely share the company name', () => {
+    for (const other of [
+      'Scoop: Anthropic whistleblower gave up his equity to leave the company',
+      'Anthropic Drops Stark AI Forecast for U.S. Economy',
+      'Emil Michael stands by Anthropic blacklist',
+    ]) {
+      for (const bio of BIO) expect(same(bio, other)).toBe(false)
+    }
+  })
+
+  it('rejects same-template different-entity stories', () => {
+    const traps: [string, string][] = [
+      ['Trump announces new tariffs on Chinese steel imports', 'Trump announces new tariffs on Mexican avocado imports'],
+      ['Arsenal beat Chelsea 2-0 in the Premier League', 'Liverpool beat Everton 3-1 in the Premier League'],
+      ['OpenAI launches ChatGPT for Financial Services', 'OpenAI launches Sora for video editing'],
+    ]
+    const trapDf = buildDocFrequency(traps.flat())
+    const trapMax = distinctivenessCutoff(traps.flat().length)
+    for (const [a, b] of traps) expect(sameStory(a, b, trapDf, trapMax)).toBe(false)
+  })
+
+  it('needs distinctive shared tokens, not just ambient ones', () => {
+    // 'anthropic' is in most of the corpus, so sharing only it must not merge.
+    expect(same(
+      'Anthropic opens a new office in Dublin to serve European customers',
+      'Anthropic names a chief financial officer ahead of an expected funding round',
+    )).toBe(false)
+  })
+})
+
+describe('properNouns', () => {
+  it('finds entities in sentence-case headlines', () => {
+    expect(properNouns('Anthropic blocks accounts of several scientists in Boston')).toEqual(
+      new Set(['anthropic', 'boston']),
+    )
+    // the leading entity must be included, or these two look identical
+    const a = properNouns('Anthropic blocks accounts of several scientists in Boston')
+    const b = properNouns('OpenAI blocks accounts of several scientists in Boston')
+    expect([...a].some(w => !b.has(w)) && [...b].some(w => !a.has(w))).toBe(true)
+  })
+  it('returns empty for Title Case, where capitalisation carries no signal', () => {
+    expect(properNouns('Anthropic Drops Stark AI Forecast For The U.S. Economy').size).toBe(0)
+  })
+  it('ignores parenthetical attributions', () => {
+    expect(properNouns('Anthropic says it disrupted several plots (Dustin Volz/New York Times)').has('volz')).toBe(false)
   })
 })
