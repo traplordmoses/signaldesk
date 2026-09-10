@@ -231,11 +231,33 @@ export async function clusterNewItems(): Promise<number> {
   // from its canonical (highest-scoring) item instead.
   const groups: [string, typeof unprocessed][] = [['all', unprocessed]]
 
-  // Distinctiveness is measured against THIS batch, so the cutoff adapts to what
-  // is ambient right now: during a wave of AI coverage 'anthropic' stops being
-  // a useful signal on its own, while 'bioweapons' still pins down one story.
-  const df = buildDocFrequency(unprocessed.map(it => it.title + ' ' + (it.summary ?? '')))
-  const dfMax = distinctivenessCutoff(unprocessed.length)
+  // Distinctiveness is measured over a RECENT WINDOW, not the current batch.
+  //
+  // A 5-minute tick brings ~10 articles. On a corpus that small every token
+  // looks rare — the cutoff floors at 3 — so the distinctiveness test silently
+  // stops discriminating and merges fire on ambient words. That is exactly what
+  // happened in production: "ChatGPT Error in Message Stream: What Does It Mean"
+  // joined the "ChatGPT for Financial Services" cluster on nothing more than
+  // 'chatgpt' + 'openai', because in a 10-item batch those looked distinctive.
+  //
+  // Six hours is ~700 items at current rates, which is the scale the thresholds
+  // were calibrated at, and it still tracks what is ambient TODAY rather than
+  // using a fixed vocabulary.
+  const DF_WINDOW_MS = 6 * 60 * 60 * 1000
+  const dfCorpus = db.select({ title: newsItems.title, summary: newsItems.summary })
+    .from(newsItems)
+    .where(gt(newsItems.ingestedAt, Date.now() - DF_WINDOW_MS))
+    .all()
+    .map(r => r.title + ' ' + (r.summary ?? ''))
+  // Unprocessed items are already rows in news_items, so they are inside the
+  // window; fall back to the batch alone only if the window somehow came back
+  // thin (fresh install, post-prune).
+  const corpus = dfCorpus.length >= unprocessed.length
+    ? dfCorpus
+    : unprocessed.map(it => it.title + ' ' + (it.summary ?? ''))
+  const df = buildDocFrequency(corpus)
+  const dfMax = distinctivenessCutoff(corpus.length)
+  console.log(`[clusterer] distinctiveness corpus ${corpus.length} items, cutoff df<=${dfMax}`)
 
   let clustersCreated = 0
 

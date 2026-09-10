@@ -177,3 +177,53 @@ describe('properNouns', () => {
     expect(properNouns('Anthropic says it disrupted several plots (Dustin Volz/New York Times)').has('volz')).toBe(false)
   })
 })
+
+/**
+ * Regression: distinctiveness needs a corpus big enough to mean anything.
+ *
+ * A 5-minute fetch tick brings ~10 articles. distinctivenessCutoff floors at 3,
+ * so on a batch that small almost every token looks rare and the guard stops
+ * discriminating. In production this merged "ChatGPT Error in Message Stream:
+ * What Does It Mean" into the "ChatGPT for Financial Services" cluster on
+ * nothing but 'chatgpt' + 'openai'. The clusterer now builds its frequencies
+ * from a 6-hour window instead of the batch.
+ */
+describe('distinctiveness corpus size', () => {
+  const CANONICAL = 'OpenAI launches ChatGPT for Financial Services for Wall Street'
+  const JUNK = 'ChatGPT Error in Message Stream: What Does It Mean and OpenAI Status Today'
+
+  it('a tick-sized corpus is too small for the guard to work', () => {
+    const tick = [CANONICAL, JUNK, ...Array.from({ length: 8 }, (_, i) => `Unrelated story ${i} about shipping rates`)]
+    const df = buildDocFrequency(tick)
+    // Documents the failure mode: 'openai'/'chatgpt' look rare here, so this merges.
+    expect(sameStory(CANONICAL, JUNK, df, distinctivenessCutoff(tick.length))).toBe(true)
+  })
+
+  it('a realistic window makes ambient tokens ambient again', () => {
+    const window = [
+      CANONICAL,
+      JUNK,
+      // a normal few hours of AI coverage: OpenAI and ChatGPT are everywhere
+      ...Array.from({ length: 60 }, (_, i) => `OpenAI and ChatGPT news item ${i} covering the model rollout`),
+      ...Array.from({ length: 250 }, (_, i) => `Unrelated market story ${i} about shipping and freight rates`),
+    ]
+    const df = buildDocFrequency(window)
+    expect(sameStory(CANONICAL, JUNK, df, distinctivenessCutoff(window.length))).toBe(false)
+  })
+
+  it('still merges genuine coverage of the same story in that same window', () => {
+    const window = [
+      CANONICAL,
+      'OpenAI launches financial tool for Wall Street bankers',
+      ...Array.from({ length: 60 }, (_, i) => `OpenAI and ChatGPT news item ${i} covering the model rollout`),
+      ...Array.from({ length: 250 }, (_, i) => `Unrelated market story ${i} about shipping and freight rates`),
+    ]
+    const df = buildDocFrequency(window)
+    expect(sameStory(
+      CANONICAL,
+      'OpenAI launches financial tool for Wall Street bankers',
+      df,
+      distinctivenessCutoff(window.length),
+    )).toBe(true)
+  })
+})
