@@ -334,10 +334,18 @@ export async function clusterNewItems(): Promise<number> {
         let existingSummaries: string[] = []
         try { existingSummaries = JSON.parse(existing.constituentSummaries ?? '[]') } catch { /* keep [] */ }
         const existingText = existing.canonicalHeadline + ' ' + existingSummaries.join(' ')
-        const candidateText = clusterTexts.join(' ')
+
+        // The same-story test compares HEADLINE to HEADLINE, not the candidate's
+        // accumulated text against the cluster's accumulated text. Concatenating
+        // everything makes a big cluster a magnet: the more items it absorbs the
+        // more tokens it offers, so the easier it is for anything to match, and
+        // it grows without bound. Production showed exactly that — one Anthropic
+        // cluster reached 16 items and had pulled in T. Rowe Price. Anchoring on
+        // the canonical headline keeps the test on what the cluster is ABOUT,
+        // and matches the headline-to-headline data the thresholds were tuned on.
         if (
           shouldMergeIntoExisting(candidateKw, existingText) ||
-          sameStory(candidateText, existingText, df, dfMax)
+          sameStory(canonical.title, existing.canonicalHeadline, df, dfMax)
         ) {
           mergedInto = existing
           break
