@@ -24,9 +24,11 @@ export const TARGET_MIX: Record<string, number> = {
   science_health:       0.13,
   tech_ai:              0.12,
   crypto:               0.12,
-  politics_elections:   0.12,
-  economics:            0.10,
+  politics_elections:   0.10,
   breaking_geopolitics: 0.08,
+  economics:            0.07,
+  offbeat:              0.05,   // odd/catchy lane — taken from economics and politics,
+                                // the two lowest-approving buckets with real volume
   culture:              0.03,
   local:                0.02,
 }
@@ -38,6 +40,7 @@ export const BUCKET_LABEL: Record<string, string> = {
   economics:            'Economics / finance',
   crypto:               'Crypto',
   tech_ai:              'Tech & AI',
+  offbeat:              'Offbeat / catchy',
   culture:              'Culture / entertainment',
   science_health:       'Science / health',
   local:                'Local / hyperlocal',
@@ -61,6 +64,7 @@ const BUCKET_OF: Record<string, string> = {
   // source-category fallbacks
   economics: 'economics', tech: 'tech_ai', science: 'science_health',
   health: 'science_health', entertainment: 'culture', music: 'culture',
+  offbeat: 'offbeat',
 }
 
 /**

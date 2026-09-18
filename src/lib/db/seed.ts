@@ -169,6 +169,46 @@ export const DEFAULT_NEWS_SOURCES = [
   { id: 'techcrunch_ai',    name: 'TechCrunch AI',    url: 'https://techcrunch.com/category/artificial-intelligence/feed/', category: 'tech', weight: 8 },
   { id: 'verge_ai',         name: 'The Verge AI',     url: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml', category: 'tech', weight: 8 },
   { id: 'mit_tr_ai',        name: 'MIT Tech Review AI', url: 'https://www.technologyreview.com/topic/artificial-intelligence/feed', category: 'tech', weight: 7 },
+
+  // Sports lane, added 2026-09-18. ~90% of Probly's ~1,900 live markets are
+  // sports, and they are European football and UFC — Premier League, La Liga,
+  // Serie A, Bundesliga, Ligue 1, Primeira Liga, MLS, Brasileirão ~200 markets
+  // each, UFC ~50 — while the bot's sports drafts were NFL fantasy picks and ESPN
+  // contracts. These are the stories that can carry a Probly market link.
+  // Verified from the droplet with the bot's own user-agent (200 + live items).
+  // Dead or blocked when tested: Goal.com, MMA Fighting, MMA Junkie, Bloody Elbow.
+  { id: 'bbc_football',     name: 'BBC Sport Football', url: 'https://feeds.bbci.co.uk/sport/football/rss.xml',       category: 'sports', weight: 8 },
+  { id: 'sky_football',     name: 'Sky Sports Football', url: 'https://www.skysports.com/rss/12040',                  category: 'sports', weight: 8 },
+  { id: 'guardian_football', name: 'Guardian Football', url: 'https://www.theguardian.com/football/rss',              category: 'sports', weight: 8 },
+  { id: 'football_espana',  name: 'Football España',  url: 'https://www.football-espana.net/feed',                   category: 'sports', weight: 7 },
+  { id: 'football_italia',  name: 'Football Italia',  url: 'https://football-italia.net/feed/',                      category: 'sports', weight: 7 },
+  { id: 'ninety_min',       name: '90min',            url: 'https://www.90min.com/posts.rss',                        category: 'sports', weight: 6 },
+  { id: 'sherdog',          name: 'Sherdog',          url: 'https://www.sherdog.com/rss/news.xml',                   category: 'sports', weight: 7 },
+  // Google News covers the leagues no dedicated English feed does. Titles arrive
+  // as "Headline - Publisher"; fetchRssSource strips that for news.google.com.
+  // Deliberately NOT publisher-allowlisted like the market lane: the team asked
+  // for more aggressive sports scraping, and quality is judged downstream by the
+  // scorer, catchiness rating and review — at a modest source weight.
+  { id: 'gn_ufc',           name: 'UFC (Google News)',          url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=UFC+when:1d',                                      category: 'sports', weight: 7 },
+  { id: 'gn_bundesliga',    name: 'Bundesliga (Google News)',   url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=Bundesliga+when:1d',                               category: 'sports', weight: 7 },
+  { id: 'gn_ligue1',        name: 'Ligue 1 (Google News)',      url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=%22Ligue+1%22+when:1d',                            category: 'sports', weight: 7 },
+  { id: 'gn_europa',        name: 'Europa League (Google News)', url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=%22Europa+League%22+when:1d',                     category: 'sports', weight: 7 },
+  { id: 'gn_liga_portugal', name: 'Liga Portugal (Google News)', url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=%28%22Primeira+Liga%22+OR+%22Liga+Portugal%22%29+when:1d', category: 'sports', weight: 6 },
+  { id: 'gn_mls',           name: 'MLS (Google News)',          url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=MLS+soccer+when:1d',                               category: 'sports', weight: 6 },
+  { id: 'gn_brasileirao',   name: 'Brasileirão (Google News)',  url: 'https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q=Brasileir%C3%A3o+when:1d',                         category: 'sports', weight: 6 },
+
+  // Space and defence: space was the best-approving category last week (38%), and
+  // "US military acknowledges space weapons in orbit" is the kind of story wanted.
+  { id: 'twz',              name: 'The War Zone',     url: 'https://www.twz.com/feed',                               category: 'politics', weight: 7 },
+  { id: 'defense_news',     name: 'Defense News',     url: 'https://www.defensenews.com/arc/outboundfeeds/rss/',     category: 'politics', weight: 7 },
+  { id: 'spaceflight_now',  name: 'Spaceflight Now',  url: 'https://spaceflightnow.com/feed/',                       category: 'science',  weight: 7 },
+
+  // Offbeat lane for the catchiness scorer. Its own category, because filed under
+  // entertainment a keyword-less odd story falls back to the culture bucket —
+  // capped at 3% after approving 0 of 43 — and the mix would bury exactly what the
+  // team asked for. UPI Odd News (403) and r/news (429) tested dead.
+  { id: 'nottheonion',      name: 'r/nottheonion',    url: 'https://www.reddit.com/r/nottheonion/top/.rss?t=day',    category: 'offbeat',  weight: 6 },
+  { id: 'oddity_central',   name: 'Oddity Central',   url: 'https://www.odditycentral.com/feed',                     category: 'offbeat',  weight: 5 },
 ] as const
 
 // Event/alert adapters that an earlier "optimistic only" pass force-disabled.
@@ -245,11 +285,10 @@ export async function syncDefaultSources() {
   // on existing DBs so operator tuning survives, so editing these only affects a
   // fresh install; change a running deployment from the dashboard or /api/settings.
   //
-  // Cadence targets ~60 posts/day, and the COOLDOWN is what delivers it: at 20
-  // min between posts the ceiling is 72/day (1440/20), and cycles with no
-  // qualifying candidate mean the real figure lands under that (~57 was the
-  // observed rate the last time this ran at 20 min). Supply is not the binding
-  // constraint: 278 clusters were queued above the 6.5 gate when this was set.
+  // Cadence targets ~80 posts/day, and the COOLDOWN is what delivers it: at 15
+  // min between posts the ceiling is 96/day (1440/15). At 20 min it held a flat
+  // ~57/day for a week. Supply is not the binding constraint — hundreds of
+  // clusters sit above the 6.5 gate — so pacing is the only thing setting output.
   // daily_post_limit is only a runaway guard on LLM spend.
   //
   // It must sit ABOVE the cooldown-implied rate. isOverDailyLimit() is a hard
@@ -263,8 +302,8 @@ export async function syncDefaultSources() {
       platformName: 'SignalDesk',
       marketBaseUrl: 'https://yourplatform.com/markets',
       autoGenerateThreshold: 6.5,
-      postCooldownMinutes: 20,
-      dailyPostLimit: 100,
+      postCooldownMinutes: 15,
+      dailyPostLimit: 130,
       larkEnabled: 1,
       updatedAt: Date.now(),
     })
