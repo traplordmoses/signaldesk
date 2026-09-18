@@ -82,7 +82,18 @@ const PENDING_TTL_MS = 8 * 60 * 60 * 1000
 // content-category) — under-served buckets get a boost, over-served ones a
 // penalty, measured against the last day of posts.
 const MIX_WINDOW_MS = 24 * 60 * 60 * 1000
-const TARGET_BIAS_SCALE = 12   // score points per unit of (target − actual) share
+// Score points per unit of (target − actual) share. Was 12, which was too weak
+// to hold the mix: scores cap at 10 and most candidates sit at 9.7-10, so a
+// bucket running 9 points over target lost only ~1.1 and kept winning. That is
+// how tech_ai reached 24% of drafts against a 15% target after the AI boost
+// landed. At 20 the same overshoot costs ~1.8, enough to hand the slot on.
+const TARGET_BIAS_SCALE = 20
+
+// Selection-time preference for a story that maps to a live Probly market. The
+// scorer's +2 gets such stories over the gate, but relevance caps at 10, so it
+// cannot separate them from everything else already sitting at 9.7-10. This is
+// uncapped, so among equally strong candidates the one with a market wins.
+const PROBLY_SELECTION_BONUS = 1.5
 function bucketOf(sourceCategory: string, headline: string, summaries: string | null): string {
   return bucketForCategory(detectCategory(headline, summariesText(summaries)), sourceCategory)
 }
@@ -219,11 +230,18 @@ async function runAutoGenerate() {
         mixTotal++
       }
     }
+    const { problyMarketFor } = await import('@/lib/markets/probly')
+    const hasProbly = new Map<string, boolean>()
+    for (const c of candidates) {
+      const text = summariesText(c.constituentSummaries)
+      hasProbly.set(c.id, problyMarketFor(c.canonicalHeadline, text, detectCategory(c.canonicalHeadline, text)) != null)
+    }
     const effectiveScore = (c: typeof candidates[number]) => {
       const b = bucketOf(c.category, c.canonicalHeadline, c.constituentSummaries)
       const target = TARGET_MIX[b] ?? 0
       const actual = mixTotal > 0 ? (bucketCount.get(b) ?? 0) / mixTotal : target
-      return (c.relevanceScore ?? 0) + TARGET_BIAS_SCALE * (target - actual)
+      const probly = hasProbly.get(c.id) ? PROBLY_SELECTION_BONUS : 0
+      return (c.relevanceScore ?? 0) + TARGET_BIAS_SCALE * (target - actual) + probly
     }
 
     // Best first by target-adjusted score, tie-broken by recency (newer first).
@@ -379,6 +397,15 @@ async function runMarketsRefresh() {
     console.log(`[cron] markets refresh: poly=${r.polymarket} kalshi=${r.kalshi} new_extractions=${r.newExtractions}${r.errors.length ? ` errors=${r.errors.length}` : ''}`)
     if (r.errors.length > 0) {
       for (const err of r.errors.slice(0, 3)) console.warn(`[cron] markets:`, err)
+    }
+
+    try {
+      const { refreshProblyMarkets } = await import('@/lib/markets/probly')
+      const p = await refreshProblyMarkets()
+      console.log(`[cron] probly refresh: ${p.stored} markets${p.kept ? ' (KEPT previous list — fetch failed or came back thin)' : ''}, ${p.resolved ?? 0} new subjects resolved${p.errors.length ? `, errors=${p.errors.length}` : ''}`)
+      for (const err of p.errors.slice(0, 3)) console.warn(`[cron] probly:`, err)
+    } catch (e) {
+      console.error('[cron] probly refresh failed:', (e as Error).message)
     }
   } catch (e) {
     console.error('[cron] markets refresh failed:', (e as Error).message)

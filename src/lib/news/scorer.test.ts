@@ -16,9 +16,8 @@
  * logic in isolation.
  */
 import { describe, it, expect } from 'vitest'
-import os from 'node:os'
-import path from 'node:path'
-process.env.DB_PATH = path.join(os.tmpdir(), 'signaldesk-scorer-test.db')
+// Isolated database via src/test/setup.ts. (A DB_PATH assignment here used to
+// sit above the imports and never took effect — imports are hoisted.)
 import { detectRisk, scoreItem, detectCategory } from './scorer'
 
 describe('detectRisk', () => {

@@ -5,6 +5,7 @@ import { SIGNALDESK_PROMPT_V1 } from './prompts'
 import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
 import { detectCategory } from '@/lib/news/scorer'
 import { marketFit } from '@/lib/markets'
+import { problyMarketFor } from '@/lib/markets/probly'
 import { bucketForCategory } from '@/lib/mix'
 import { enforceOneLiner, tagForCategory } from './shape'
 
@@ -262,11 +263,20 @@ export const __testing = {
 }
 
 export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
-  const marketBaseUrl = process.env.NEXT_PUBLIC_MARKET_BASE_URL ?? 'https://yourplatform.com/markets'
-  const marketUrl = `${marketBaseUrl}/${cluster.id}`
+  // Content category drives the brand dot, the Probly match and the telemetry.
+  let signalSummary = ''
+  try { signalSummary = (JSON.parse(cluster.constituentSummaries ?? '[]') as string[]).join(' ') } catch { /* keep '' */ }
+  const contentCategory = detectCategory(cluster.canonicalHeadline, signalSummary)
+
+  // The live Probly market this story is about, if any. This replaces the old
+  // marketLink, which was `${NEXT_PUBLIC_MARKET_BASE_URL}/${cluster.id}` — a URL
+  // built from the cluster's own UUID that pointed at nothing. It is shown to
+  // reviewers on the Lark card only; the tweet stays URL-free.
+  const probly = problyMarketFor(cluster.canonicalHeadline, signalSummary, contentCategory)
+  const marketUrl = probly?.url ?? ''
 
   try {
-    const result = await callClaude(cluster, marketUrl, modeHint)
+    const result = await callClaude(cluster, marketUrl || '(no live Probly market)', modeHint)
 
     // Force-strip ANY URL from ALL modes (tweets are text-only per marketing),
     // and convert em/en dashes to a comma — they read as AI-written, and the
@@ -279,11 +289,6 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       .replace(/,\s*,/g, ', ')
       .replace(/\n+$/, '')
       .trim()
-
-    // Content category drives both the brand dot and the telemetry below.
-    let signalSummary = ''
-    try { signalSummary = (JSON.parse(cluster.constituentSummaries ?? '[]') as string[]).join(' ') } catch { /* keep '' */ }
-    const contentCategory = detectCategory(cluster.canonicalHeadline, signalSummary)
 
     // House shape: tag + label + ONE sentence. The prompt asks for it; this
     // guarantees it, because the model drifts back toward the old context-line
@@ -321,6 +326,9 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       score: Number((cluster.relevanceScore ?? 0).toFixed(2)),
       bucket,
       contentCategory,
+      probly: probly
+        ? { question: probly.question, url: probly.url, priceYes: probly.priceYes, league: probly.league }
+        : null,
       sourceCategory: cluster.category,
       market: { matched: fit.matched, category: fit.category, volume: Math.round(fit.maxVolume) },
       mode: result.content_mode,
@@ -333,7 +341,7 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       clusterId: cluster.id,
       contentMode: result.content_mode,
       content: result.content,
-      marketLink: marketUrl,
+      marketLink: marketUrl,   // '' when the story has no live Probly market (column is NOT NULL)
       charCount: result.char_count ?? result.content.length,
       estimatedScore: result.estimated_score,
       scoreExplanation: result.score_explanation,

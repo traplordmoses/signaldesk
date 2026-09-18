@@ -60,6 +60,9 @@ export interface GeneratedPost {
   reviewedBy: string | null
   larkMessageId: string | null
   larkSentAt: number | null
+  // Decision telemetry JSON (score, bucket, category, Probly market…). Present in
+  // the table since the telemetry work but missing from this hand-written type.
+  signals: string | null
   createdAt: number
   updatedAt: number
 }

@@ -404,6 +404,12 @@ function anyHit(text: string, keywords: string[]): boolean {
 // the top of the range.
 const NO_MARQUEE_SCORE_CAP = 8.0
 
+// A live Probly market for the story. Enough to lift a genuine fixture story
+// over the 6.5 gate (a La Liga preview tends to land ~5 on category + recency
+// alone); the stronger preference is applied at SELECTION time in the scheduler,
+// because scores cap at 10 and most drafted stories already sit near the cap.
+export const PROBLY_MARKET_BOOST = 2
+
 export function scoreItem(title: string, summary: string, weight: number, publishedAt: number): number {
   const text = (title + ' ' + (summary ?? '')).toLowerCase()
 
@@ -466,6 +472,24 @@ export function scoreItem(title: string, summary: string, weight: number, publis
     // markets module not available — no market signal, continue
   }
 
+  // 7b) PROBLY market fit — the platform these posts go out on. Polymarket and
+  //     Kalshi above are a proxy for "people bet on this"; a live Probly market
+  //     is the real thing, and it's what lets the Lark card link the market.
+  //     Probly is ~90% sports (EPL, La Liga, Serie A, Bundesliga, Ligue 1, MLS,
+  //     UFC…), so this is also what steers sports coverage toward fixtures that
+  //     have a market instead of fantasy-pick filler. Gated on the story being
+  //     sports inside problyMarketFor, so a Monaco royal story can't match AS
+  //     Monaco. Lazy-required for the same circular-import reason as above.
+  let problyMatched = false
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { problyMarketFor } = require('../markets/probly') as typeof import('../markets/probly')
+    problyMatched = problyMarketFor(title, summary, detectCategory(title, summary ?? '')) != null
+  } catch {
+    // probly table not built yet — no signal, continue
+  }
+  const problyBoost = problyMatched ? PROBLY_MARKET_BOOST : 0
+
   // 8) Frontier-AI priority. AI news almost never maps to a live market, so it
   //    can't earn the market boost that is otherwise the spine of this scale,
   //    and it was landing ~2-4 against a 6.5 gate however good the story. This
@@ -478,15 +502,15 @@ export function scoreItem(title: string, summary: string, weight: number, publis
     if (anyHit(text, AI_DEVELOPING)) aiBoost += AI_DEVELOPING_BOOST
   }
 
-  let score = categoryFit + anticipation + valence + source + ticker + recency + marketBoost + aiBoost
+  let score = categoryFit + anticipation + valence + source + ticker + recency + marketBoost + problyBoost + aiBoost
 
   // Local-crime penalty — applied AFTER all bonuses so it docks the final
   // composite score. Capped at one penalty per article.
   if (anyHit(text, LOCAL_CRIME)) score -= LOCAL_CRIME_PENALTY
 
-  // Ceiling: a live-market match OR a marquee on-brand category earns 10;
-  // everything else caps at 8.
-  const ceiling = (marketMatched || marquee) ? 10 : NO_MARQUEE_SCORE_CAP
+  // Ceiling: a live-market match (Polymarket, Kalshi or Probly) OR a marquee
+  // on-brand category earns 10; everything else caps at 8.
+  const ceiling = (marketMatched || problyMatched || marquee) ? 10 : NO_MARQUEE_SCORE_CAP
   return Math.min(ceiling, Math.max(0, score))
 }
 

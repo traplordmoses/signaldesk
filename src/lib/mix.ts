@@ -6,27 +6,29 @@
  * The eight buckets mirror the table exactly — note politics & elections and
  * breaking/geopolitics are kept SEPARATE.
  */
-// Rebalanced 2026-09-10 against ten days of review decisions (the first ten
-// days the team was actually clicking). Approval rate by content category:
+// Rebalanced 2026-09-18, the second pass on real review decisions. Approval
+// rate by content category, Sep 11-17 (drafts in brackets):
 //
-//   crypto 44%  ·  tech_ai 22%  ·  sports 21%  ·  economy 16%
-//   elections 13%  ·  geopolitics 10%  ·  pop_culture 4%
+//   space 38% (8)  ·  sports 11% (99)  ·  crypto 9% (34)  ·  economy 8% (60)
+//   geopolitics 8% (25)  ·  tech_ai 7% (104)  ·  elections 5% (20)
+//   politics 4% (26)  ·  pop_culture 0% (43)
 //
-// crypto and AI were the two best-performing categories AND the two most
-// starved; culture was the worst performer and took the second-most slots.
-// tech_ai also gets its own bucket here — it used to roll up into
-// science_health and compete with health, space and cyber for a single 10%
-// slice, which is the structural reason AI news was rare.
+// Sports up 18 -> 28%: the team asked for it explicitly, it is the best-approving
+// category at real volume, and ~90% of Probly's ~1,900 live markets are sports,
+// so these are the stories that can carry a market link. tech_ai down 15 -> 12%:
+// it was drafting 24% of posts at 7% approval (the steering-strength fix in the
+// scheduler is what actually holds it here). science_health up to 13% because
+// space lives in it. culture down to 3%: zero approvals from 43 drafts.
 export const TARGET_MIX: Record<string, number> = {
-  politics_elections:   0.15,
-  breaking_geopolitics: 0.08,
-  sports:               0.18,
-  economics:            0.12,
+  sports:               0.28,
+  science_health:       0.13,
+  tech_ai:              0.12,
   crypto:               0.12,
-  tech_ai:              0.15,
-  culture:              0.05,
-  science_health:       0.10,
-  local:                0.05,
+  politics_elections:   0.12,
+  economics:            0.10,
+  breaking_geopolitics: 0.08,
+  culture:              0.03,
+  local:                0.02,
 }
 
 export const BUCKET_LABEL: Record<string, string> = {

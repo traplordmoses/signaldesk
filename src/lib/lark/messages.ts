@@ -104,6 +104,19 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
 
 // ====================== Card helpers (Schema 1.0) ======================
 
+interface ProblyRef { question: string; url: string; priceYes: number; league: string | null }
+
+/** The Probly market recorded on a post's telemetry, if the generator found one. */
+function problyFromSignals(signals: string | null | undefined): ProblyRef | null {
+  if (!signals) return null
+  try {
+    const p = (JSON.parse(signals) as { probly?: ProblyRef | null }).probly
+    return p && typeof p.url === 'string' && typeof p.question === 'string' ? p : null
+  } catch {
+    return null
+  }
+}
+
 function md(content: string) {
   return { tag: 'div', text: { tag: 'lark_md', content } }
 }
@@ -203,11 +216,17 @@ export function buildReviewCard(
   const allTags = [categoryLabel, ...topics.map(englishTag)]
   elements.push(md(`${allTags.join('  ·  ')}  ·  Score **${(cluster.relevanceScore ?? 0).toFixed(1)}**/10`))
 
-  // Risk warning — only when actually elevated
+  // Risk warning — only when actually elevated. High-risk stories (shootings,
+  // terror, killings…) used to be dropped before they ever reached this card.
+  // They now come through for the team to judge, and every one of them goes to
+  // legal before it is posted, so the card says so and names what tripped it.
+  let riskReasons: string[] = []
+  try { riskReasons = JSON.parse(cluster.riskReasons ?? '[]') as string[] } catch { /* keep [] */ }
+  const flagged = riskReasons.length > 0 ? `  ·  flagged: _${riskReasons.slice(0, 4).join(', ')}_` : ''
   if (cluster.riskLevel === 'high') {
-    elements.push(md('🚨 **HIGH RISK** — review carefully before approving'))
+    elements.push(md(`🚨 **SENSITIVE — needs legal review before posting**${flagged}`))
   } else if (cluster.riskLevel === 'medium') {
-    elements.push(md('⚠️ Medium risk — double-check before approving'))
+    elements.push(md(`⚠️ Medium risk — double-check before approving${flagged}`))
   }
 
   for (const post of posts) {
@@ -224,6 +243,16 @@ export function buildReviewCard(
 
     // Tweet body — always visible so reviewer can read before deciding
     elements.push(md(displayContent))
+
+    // The live Probly market this story is about. Reviewer-only context: it is
+    // never part of the tweet. Omitted when no market matched rather than
+    // showing a placeholder, so its presence always means a real market.
+    const market = problyFromSignals(post.signals)
+    if (market) {
+      const league = market.league ? `${market.league}  ·  ` : ''
+      const pct = Math.round(market.priceYes * 100)
+      elements.push(md(`📊 **Probly market:** ${league}${market.question}  ·  YES ${pct}%  ·  [open market](${market.url})`))
+    }
 
     // Two actions, side by side. The X composer at the manual post step
     // is the edit surface for any wording tweaks.
