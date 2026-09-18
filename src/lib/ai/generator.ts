@@ -6,6 +6,7 @@ import { getApprovedExamples, MIN_EXAMPLES } from '@/lib/feedback'
 import { detectCategory } from '@/lib/news/scorer'
 import { marketFit } from '@/lib/markets'
 import { problyMarketFor } from '@/lib/markets/probly'
+import { sensitiveStoriesAllowed } from '@/lib/policy'
 import { bucketForCategory } from '@/lib/mix'
 import { enforceOneLiner, tagForCategory } from './shape'
 
@@ -406,11 +407,16 @@ export async function generateSmartPosts(cluster: Cluster) {
     return []
   }
 
-  // HIGH_RISK gate — clusters flagged with riskLevel='high' (death, shooting, bombing, etc.)
-  // are NEVER auto-generated. They sit at status='high_risk_skipped' until a human explicitly
-  // calls /api/posts/generate with the cluster_id. Stops the bot from auto-writing
-  // "what's the Polymarket angle on this tragedy" posts.
-  if (cluster.riskLevel === 'high') {
+  // HIGH_RISK gate — clusters flagged riskLevel='high' (shooting, terror, killings…).
+  //
+  // By default these now go through to review, flagged SENSITIVE on the Lark card
+  // with the words that tripped the classifier; every post is cleared by legal
+  // before publishing, so the bot no longer pre-censors. See src/lib/policy.ts.
+  // With ALLOW_SENSITIVE_STORIES=0 the old behaviour returns: the cluster parks at
+  // status='high_risk_skipped' until someone calls /api/posts/generate with its id.
+  if (cluster.riskLevel === 'high' && sensitiveStoriesAllowed()) {
+    console.log(`[generate] sensitive story sent for legal review (${cluster.riskReasons}): ${cluster.canonicalHeadline.slice(0, 70)}`)
+  } else if (cluster.riskLevel === 'high') {
     db.update(eventClusters)
       .set({ status: 'high_risk_skipped', lastUpdatedAt: Date.now() })
       .where(eq(eventClusters.id, cluster.id))

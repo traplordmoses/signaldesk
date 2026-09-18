@@ -5,9 +5,13 @@
  * The score is a clamped sum of signals:
  *   MarketFit    0..+5    does the headline map to a live, actively-traded
  *                         Polymarket/Kalshi market? (the SPINE — see ../markets)
+ *   ProblyFit    0..+2    does it map to a live market on PROBLY, the platform
+ *                         these posts go out on? (../markets/probly)
  *   CategoryFit  0..+3    which Polymarket category does it fall in?
  *   Anticipation 0..+2    forward-looking, decidable "before it happens" framing
  *   Valence     -6..+2    optimism reward / soft-negative / gore penalty
+ *                         (the gore floor applies only in strict mode — see
+ *                         src/lib/policy.ts)
  *   Source       0..+1    feed credibility
  *   Ticker       0..+1.5  priority company / asset mention
  *   Recency      0..+0.5  small freshness nudge (deliberately small)
@@ -22,6 +26,7 @@
  * "Will Russia capture Sumy?" market question retains its category + market
  * score, while "40 killed in Sumy strike" is docked into the floor.
  */
+import { sensitiveStoriesAllowed } from '@/lib/policy'
 
 // ── Polymarket category taxonomy ────────────────────────────────────────────
 // Scanned from the Gamma API (tags + top events) + site nav on 2026-06-19.
@@ -433,7 +438,12 @@ export function scoreItem(title: string, summary: string, weight: number, publis
   const valenceText = text.replace(BENIGN_NEGATIVE_PHRASES, ' ')
   let valence = countHits(text, POSITIVE, 2)
   if (anyHit(valenceText, SOFT_NEGATIVE)) valence -= 2
-  if (anyHit(valenceText, GORE)) valence -= 4
+  // Gore framing is floored only in strict mode. With sensitive stories allowed
+  // (the default — see src/lib/policy.ts) the −4 would silently re-impose the old
+  // policy: a foiled-plot story mentioning "shooting" could never clear the gate
+  // however unusual it was. Casualty reports aren't promoted either — they get no
+  // boost, and the mix caps geopolitics — they simply stop being floored.
+  if (!sensitiveStoriesAllowed() && anyHit(valenceText, GORE)) valence -= 4
 
   // 4) Source credibility.
   let source = 0

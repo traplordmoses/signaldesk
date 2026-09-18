@@ -147,18 +147,51 @@ describe('scoreItem — optimism-weighted model', () => {
     })
   })
 
-  describe('gore is floored, but the geopolitics topic survives', () => {
+  // Two policies, both kept reachable (src/lib/policy.ts). Strict mode is the
+  // original: gore framing floored to zero. The default since 2026-09-18 lets
+  // sensitive stories compete, because they now go to legal review rather than
+  // being pre-censored — and a floor would silently keep the old policy in place.
+  const strict = <T,>(fn: () => T): T => {
+    process.env.ALLOW_SENSITIVE_STORIES = '0'
+    try { return fn() } finally { delete process.env.ALLOW_SENSITIVE_STORIES }
+  }
+
+  describe('gore is floored in STRICT mode, but the geopolitics topic survives', () => {
     it('docks gore framing to the floor', () => {
-      const score = scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs)
+      const score = strict(() => scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs))
       expect(score).toBe(0)
       expect(detectRisk('40 killed as Russia shells Ukraine city').level).toBe('high')
     })
 
     it('keeps a neutral / de-escalation geopolitics market well above its gore version', () => {
-      const deescalation = scoreItem('Russia and Ukraine agree ceasefire deal', '', midWeight, oldTs)
-      const gore = scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs)
+      const deescalation = strict(() => scoreItem('Russia and Ukraine agree ceasefire deal', '', midWeight, oldTs))
+      const gore = strict(() => scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs))
       expect(deescalation).toBeGreaterThan(3)
       expect(deescalation).toBeGreaterThan(gore)
+    })
+  })
+
+  describe('sensitive stories allowed (the default)', () => {
+    const DOORDASH = 'It has been revealed that a man accused of plotting an ISIS-inspired mass shooting was a moderator of the r/DoorDash subreddit'
+
+    it('no longer floors a foiled-plot story to zero', () => {
+      // Needs a realistic source weight and a fresh timestamp: at weight 5 and 24h
+      // old there is no positive signal at all, so both modes clamp to 0 and the
+      // test would prove nothing.
+      expect(strict(() => scoreItem(DOORDASH, '', highWeight, freshTs))).toBe(0)
+      expect(scoreItem(DOORDASH, '', highWeight, freshTs)).toBeGreaterThan(0)
+    })
+
+    it('still CLASSIFIES it as high risk, so the card is flagged for legal', () => {
+      // Letting the story through must not blind the classifier: the risk level
+      // is what puts the red SENSITIVE banner on the Lark card.
+      expect(detectRisk(DOORDASH).level).toBe('high')
+    })
+
+    it('does not promote casualty reports — it only stops flooring them', () => {
+      const calm = scoreItem('Russia and Ukraine agree ceasefire deal', '', midWeight, oldTs)
+      const gore = scoreItem('40 killed as Russia shells Ukraine city', '', lowWeight, oldTs)
+      expect(gore).toBeLessThanOrEqual(calm)
     })
 
     it('floors a doom headline that used to top the old ranking', () => {
