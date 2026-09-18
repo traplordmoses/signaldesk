@@ -177,12 +177,12 @@ export const DEFAULT_NEWS_SOURCES = [
   // contracts. These are the stories that can carry a Probly market link.
   // Verified from the droplet with the bot's own user-agent (200 + live items).
   // Dead or blocked when tested: Goal.com, MMA Fighting, MMA Junkie, Bloody Elbow.
+  // Sky Sports is NOT here: it was already seeded as sky_sports (same URL) and has
+  // been ingesting since April.
   { id: 'bbc_football',     name: 'BBC Sport Football', url: 'https://feeds.bbci.co.uk/sport/football/rss.xml',       category: 'sports', weight: 8 },
-  { id: 'sky_football',     name: 'Sky Sports Football', url: 'https://www.skysports.com/rss/12040',                  category: 'sports', weight: 8 },
   { id: 'guardian_football', name: 'Guardian Football', url: 'https://www.theguardian.com/football/rss',              category: 'sports', weight: 8 },
   { id: 'football_espana',  name: 'Football España',  url: 'https://www.football-espana.net/feed',                   category: 'sports', weight: 7 },
   { id: 'football_italia',  name: 'Football Italia',  url: 'https://football-italia.net/feed/',                      category: 'sports', weight: 7 },
-  { id: 'ninety_min',       name: '90min',            url: 'https://www.90min.com/posts.rss',                        category: 'sports', weight: 6 },
   { id: 'sherdog',          name: 'Sherdog',          url: 'https://www.sherdog.com/rss/news.xml',                   category: 'sports', weight: 7 },
   // Google News covers the leagues no dedicated English feed does. Titles arrive
   // as "Headline - Publisher"; fetchRssSource strips that for news.google.com.
@@ -246,6 +246,12 @@ const DISABLE_SOURCE_IDS: string[] = [
   'reuters_world', 'reuters_politics', 'reuters_business',
   'ap_top', 'ap_politics',
   'cbc_top', 'axios_markets',
+  // Retired 2026-09-18, the day they were added. sky_football duplicated sky_sports
+  // (identical URL, ingesting since April), so every item deduped and it added
+  // nothing. ninety_min returns HTTP 200 with 90 items, all dated 2025-09-29: the
+  // feed stopped updating a year ago. The 7-day ingest age guard dropped all 90,
+  // which is the only reason they didn't go out labelled JUST IN.
+  'sky_football', 'ninety_min',
 ]
 
 export async function seedIfEmpty() {
