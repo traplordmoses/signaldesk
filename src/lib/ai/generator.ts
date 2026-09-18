@@ -7,6 +7,7 @@ import { detectCategory } from '@/lib/news/scorer'
 import { marketFit } from '@/lib/markets'
 import { problyMarketFor } from '@/lib/markets/probly'
 import { sensitiveStoriesAllowed } from '@/lib/policy'
+import { noveltyFor } from './novelty'
 import { bucketForCategory } from '@/lib/mix'
 import { enforceOneLiner, tagForCategory } from './shape'
 
@@ -330,6 +331,9 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       probly: probly
         ? { question: probly.question, url: probly.url, priceYes: probly.priceYes, league: probly.league }
         : null,
+      // Catchiness rating (0-10) from the clustering pass, so approval rate can be
+      // read per novelty band before anyone tunes a low-novelty penalty.
+      novelty: noveltyFor([cluster.id]).get(cluster.id) ?? null,
       sourceCategory: cluster.category,
       market: { matched: fit.matched, category: fit.category, volume: Math.round(fit.maxVolume) },
       mode: result.content_mode,

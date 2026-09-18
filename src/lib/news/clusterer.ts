@@ -260,6 +260,8 @@ export async function clusterNewItems(): Promise<number> {
   console.log(`[clusterer] distinctiveness corpus ${corpus.length} items, cutoff df<=${dfMax}`)
 
   let clustersCreated = 0
+  // New clusters this tick, for the catchiness pass after the loop.
+  const created: { id: string; headline: string; baseScore: number }[] = []
 
   for (const [, items] of groups) {
     // Build keyword sets
@@ -438,9 +440,22 @@ export async function clusterNewItems(): Promise<number> {
         }
 
         clustersCreated++
+        created.push({ id: clusterId, headline: canonical.title, baseScore: maxScore })
       } catch (e) {
         console.error(`cluster create failed (cluster_id=${clusterId}, items=${clusterItems.length}):`, e)
       }
+    }
+  }
+
+  // Catchiness pass: rate this tick's new clusters and lift the genuinely unusual
+  // ones. Has to happen here rather than at selection — the candidate query
+  // filters on relevance >= 6.5 first, so a bizarre story sitting at 1.5 would
+  // never reach a selection-time bonus. Never throws; failure means no lift.
+  if (created.length > 0) {
+    const { applyNovelty } = await import('@/lib/ai/novelty')
+    const n = await applyNovelty(created)
+    if (n.rated > 0 || n.errors.length > 0) {
+      console.log(`[clusterer] novelty: rated ${n.rated}/${created.length}, lifted ${n.lifted}${n.errors.length ? `, errors=${n.errors.length} (${n.errors[0].slice(0, 80)})` : ''}`)
     }
   }
 

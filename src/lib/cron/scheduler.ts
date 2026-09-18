@@ -94,6 +94,11 @@ const TARGET_BIAS_SCALE = 20
 // cannot separate them from everything else already sitting at 9.7-10. This is
 // uncapped, so among equally strong candidates the one with a market wins.
 const PROBLY_SELECTION_BONUS = 1.5
+
+// Same reasoning for catchiness: novelty lifts an unusual story over the gate at
+// cluster time, but among candidates that all sit at 9.7-10 it needs an uncapped
+// nudge to actually be picked.
+const NOVELTY_SELECTION_BONUS = 1.5
 function bucketOf(sourceCategory: string, headline: string, summaries: string | null): string {
   return bucketForCategory(detectCategory(headline, summariesText(summaries)), sourceCategory)
 }
@@ -236,12 +241,15 @@ async function runAutoGenerate() {
       const text = summariesText(c.constituentSummaries)
       hasProbly.set(c.id, problyMarketFor(c.canonicalHeadline, text, detectCategory(c.canonicalHeadline, text)) != null)
     }
+    const { noveltyFor, NOVELTY_SELECTION_THRESHOLD } = await import('@/lib/ai/novelty')
+    const novelty = noveltyFor(candidates.map(c => c.id))
     const effectiveScore = (c: typeof candidates[number]) => {
       const b = bucketOf(c.category, c.canonicalHeadline, c.constituentSummaries)
       const target = TARGET_MIX[b] ?? 0
       const actual = mixTotal > 0 ? (bucketCount.get(b) ?? 0) / mixTotal : target
       const probly = hasProbly.get(c.id) ? PROBLY_SELECTION_BONUS : 0
-      return (c.relevanceScore ?? 0) + TARGET_BIAS_SCALE * (target - actual) + probly
+      const catchy = (novelty.get(c.id) ?? 0) >= NOVELTY_SELECTION_THRESHOLD ? NOVELTY_SELECTION_BONUS : 0
+      return (c.relevanceScore ?? 0) + TARGET_BIAS_SCALE * (target - actual) + probly + catchy
     }
 
     // Best first by target-adjusted score, tie-broken by recency (newer first).
