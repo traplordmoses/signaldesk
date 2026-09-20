@@ -17,7 +17,7 @@ const HOT_INDEXES = [
 ]
 
 export async function register() {
-  if (process.env.NEXT_RUNTIME === 'nodejs') {
+  if (process.env.NEXT_RUNTIME === 'nodejs' && process.env.SIGNALDESK_DISABLE_SCHEDULER !== '1') {
     try {
       const { migrate } = await import('drizzle-orm/better-sqlite3/migrator')
       const { db, sqlite } = await import('@/lib/db')
@@ -32,6 +32,9 @@ export async function register() {
       } else {
         console.log('[startup] migrations skipped (set RUN_MIGRATIONS=1 to enable)')
       }
+
+      const { migrateNewsroom } = await import('@/lib/db/newsroom')
+      migrateNewsroom(sqlite)
 
       // Hot-path indexes (idempotent — always safe to ensure)
       for (const sql of HOT_INDEXES) {

@@ -79,6 +79,7 @@ interface NormalizedItem {
   sourceName: string
   category: string
   publishedAt: number
+  timestampConfidence: 'feed' | 'unknown'
 }
 
 type SourceRecord = typeof newsSources.$inferSelect
@@ -173,14 +174,14 @@ function cleanText(value: unknown): string {
 }
 
 function parseTimestamp(value: string | number | null | undefined): number {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : Date.now()
-  if (!value) return Date.now()
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : 0
+  if (!value) return 0
   const parsed = Date.parse(value)
-  return Number.isFinite(parsed) ? parsed : Date.now()
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function parseFdaDate(value: string | null | undefined): number {
-  if (!value) return Date.now()
+  if (!value) return 0
   if (/^\d{8}$/.test(value)) {
     const yyyy = value.slice(0, 4)
     const mm = value.slice(4, 6)
@@ -233,7 +234,7 @@ function toNormalizedItem(
   const title = cleanText(input.title)
   const url = input.url.trim()
   if (!title || !url) return null
-  if (input.publishedAt != null && Date.now() - input.publishedAt > INGEST_MAX_AGE_MS) return null
+  if (input.publishedAt && Date.now() - input.publishedAt > INGEST_MAX_AGE_MS) return null
 
   const normalizedUrl = normalizeUrl(url)
   return {
@@ -246,7 +247,8 @@ function toNormalizedItem(
     sourceId: source.id,
     sourceName: source.name,
     category: source.category,
-    publishedAt: input.publishedAt ?? Date.now(),
+    publishedAt: input.publishedAt || Date.now(),
+    timestampConfidence: input.publishedAt && input.publishedAt <= Date.now() + 60_000 ? 'feed' : 'unknown',
   }
 }
 
@@ -631,9 +633,8 @@ export function isTrustedPublisher(publisher: string): boolean {
 // trust publishers (Crypto Briefing, Rolling Out, etc.) don't ingest.
 async function fetchMarketDrivenNews(source: SourceRecord): Promise<NormalizedItem[]> {
   const TOP_N = 8
-  const rows = sqlite.prepare<[number], { topic: string | null; volume_24h: number | null }>(
-    'SELECT topic, volume_24h FROM market_topics WHERE topic IS NOT NULL ORDER BY volume_24h DESC LIMIT ?'
-  ).all(TOP_N)
+  const { problyWatchTopics } = await import('@/lib/markets/probly')
+  const rows = problyWatchTopics(TOP_N).map(topic => ({ topic }))
 
   const items: NormalizedItem[] = []
   const seenUrls = new Set<string>()
@@ -714,21 +715,19 @@ async function fetchSource(source: typeof newsSources.$inferSelect): Promise<{ i
   }
 }
 
-export async function fetchAllSources(): Promise<{ ingested: number; errors: number }> {
-  const sources = db.select().from(newsSources).where(eq(newsSources.isActive, 1)).all()
+export async function fetchAllSources(onSourceReady?: () => void, primaryOnly = false): Promise<{ ingested: number; errors: number }> {
+  const sources = db.select().from(newsSources).where(eq(newsSources.isActive, 1)).all().filter(s => !s.url.startsWith('signaldesk://external/'))
+    .filter(s => !primaryOnly || ['fed_monetary','whitehouse_actions','openai_blog','deepmind_blog'].includes(s.id))
 
   let ingested = 0
   let errors = 0
 
-  const results = await Promise.allSettled(sources.map(s => fetchSource(s)))
-
-  for (let i = 0; i < results.length; i++) {
-    const source = sources[i]
-    const result = results[i]
-
-    if (result.status === 'rejected' || result.value.error) {
+  // Persist each source as it finishes; slow adapters cannot hold fast ones back.
+  await Promise.all(sources.map(async source => {
+    const result = await fetchSource(source)
+    if (result.error) {
       errors++
-      const errMsg = result.status === 'rejected' ? String(result.reason) : result.value.error!
+      const errMsg = result.error
       // Update source error
       db.update(newsSources)
         .set({ lastError: errMsg, lastFetchedAt: Date.now() })
@@ -749,10 +748,10 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
       } catch (e) {
         console.error(`audit log write failed (news_source ${source.id}):`, e)
       }
-      continue
+      return
     }
 
-    const { items } = result.value
+    const { items } = result
     // Base weight (seed-managed) + approval-feedback bonus (recomputeSourceWeightBonus).
     const weight = (source.weight ?? 5) + (source.weightBonus ?? 0)
     // Dedup window for title-hash bumped from 4h → 24h. RSS feeds often re-publish
@@ -806,7 +805,8 @@ export async function fetchAllSources(): Promise<{ ingested: number; errors: num
       .set({ lastFetchedAt: Date.now(), lastError: null })
       .where(eq(newsSources.id, source.id))
       .run()
-  }
+    if (items.length) onSourceReady?.()
+  }))
 
   try {
     db.insert(auditLog).values({

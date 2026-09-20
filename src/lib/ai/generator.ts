@@ -1,4 +1,7 @@
-import { db } from '@/lib/db'
+import { db, sqlite } from '@/lib/db'
+import { evidenceFor, applyFreshness } from '@/lib/editorial/evidence'
+import { laneFor } from '@/lib/editorial/priority'
+import { verifyDraft } from '@/lib/editorial/verify'
 import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/schema'
 import { eq, gt } from 'drizzle-orm'
 import { SIGNALDESK_PROMPT_V1 } from './prompts'
@@ -155,16 +158,15 @@ async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: Conten
 
   // Sanitize each constituent summary individually (so split-injection across cluster
   // items can't reassemble) then cap the joined total.
-  const summaries: string[] = []
-  try { summaries.push(...JSON.parse(cluster.constituentSummaries ?? '[]')) } catch {}
-  const sanitizedSummaries = summaries.map(s => sanitizeForPrompt(s, 200))
-  const summaryText = sanitizedSummaries.join(' ').slice(0, 600)
+  const evidence = evidenceFor(cluster)
+  if (!evidence) throw new Error('missing source evidence')
+  const summaryText = sanitizeForPrompt(evidence.text, 1600)
 
   const safeHeadline = sanitizeForPrompt(cluster.canonicalHeadline, 240)
   const safeCategory = sanitizeForPrompt(cluster.category, 40)
   const storyTag = tagForCategory(detectCategory(safeHeadline, summaryText), cluster.category)
 
-  const ageMinutes = Math.round((Date.now() - cluster.firstSeenAt) / 60000)
+  const ageMinutes = Math.round((Date.now() - evidence.publishedAt) / 60000)
   const modeInstruction = modeHint
     ? `You MUST use content_mode: "${modeHint}".`
     : `Choose the most appropriate content_mode based on the story age, category, and whether a Polymarket market likely exists.`
@@ -209,7 +211,7 @@ Now write one post.`
   const body = {
     model,
     max_tokens: 600,
-    temperature: 0.8,
+    temperature: 0.2,
     system,
     messages: [{ role: 'user', content: userPrompt }],
   }
@@ -217,6 +219,7 @@ Now write one post.`
   async function doFetch(): Promise<Response> {
     return fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: AbortSignal.timeout(30_000),
       headers: {
         'x-api-key': key,
         'anthropic-version': '2023-06-01',
@@ -253,6 +256,7 @@ Now write one post.`
     throw new Error(`AI response was not valid JSON: ${(e as Error).message}`)
   }
   const validated = validateAIResponse(parsed)
+  if (modeHint && validated.content_mode !== modeHint) throw new Error('model returned the wrong editorial mode')
   checkForFabricatedPercentages(validated.content, userPrompt)
   checkForFabricatedTickers(validated.content, userPrompt)
   return validated
@@ -266,8 +270,9 @@ export const __testing = {
 
 export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
   // Content category drives the brand dot, the Probly match and the telemetry.
-  let signalSummary = ''
-  try { signalSummary = (JSON.parse(cluster.constituentSummaries ?? '[]') as string[]).join(' ') } catch { /* keep '' */ }
+  const evidence = evidenceFor(cluster)
+  if (!evidence) throw new Error('missing source evidence')
+  const signalSummary = evidence.text
   const contentCategory = detectCategory(cluster.canonicalHeadline, signalSummary)
 
   // The live Probly market this story is about, if any. This replaces the old
@@ -276,6 +281,7 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
   // reviewers on the Lark card only; the tweet stays URL-free.
   const probly = problyMarketFor(cluster.canonicalHeadline, signalSummary, contentCategory)
   const marketUrl = probly?.url ?? ''
+  const lane = laneFor(evidence, probly != null, cluster.riskLevel)
 
   try {
     const result = await callClaude(cluster, marketUrl || '(no live Probly market)', modeHint)
@@ -309,6 +315,10 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       result.content = shaped
     }
 
+    if (result.content_mode !== 'engagement' && !/\b(BREAKING|JUST IN|NEW|UPDATE|WARNING):/.test(result.content)) throw new Error('missing alert label')
+    result.content = applyFreshness(result.content, evidence, lane === 'urgent')
+    const verification = await verifyDraft(result.content, evidence)
+
     // char_count is the model's own estimate of the text it wrote. After
     // shaping it's stale, and it's what the Lark card and the dashboard show.
     result.char_count = result.content.length
@@ -325,11 +335,12 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
     const fit = marketFit(cluster.canonicalHeadline, signalSummary)
     const bucket = bucketForCategory(contentCategory, cluster.category)
     const signals = JSON.stringify({
+      lane, evidence: { ...evidence, text: undefined }, verification,
       score: Number((cluster.relevanceScore ?? 0).toFixed(2)),
       bucket,
       contentCategory,
       probly: probly
-        ? { question: probly.question, url: probly.url, priceYes: probly.priceYes, league: probly.league }
+        ? probly
         : null,
       // Catchiness rating (0-10) from the clustering pass, so approval rate can be
       // read per novelty band before anyone tunes a low-novelty penalty.
@@ -356,7 +367,10 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       updatedAt: Date.now(),
     }
 
-    db.insert(generatedPosts).values(post).run()
+    sqlite.transaction(() => {
+      db.insert(generatedPosts).values(post).run()
+      sqlite.prepare('INSERT INTO delivery_outbox (post_id, available_at, created_at) VALUES (?, ?, ?)').run(post.id, post.createdAt, post.createdAt)
+    })()
 
     try {
       db.insert(auditLog).values({
@@ -371,6 +385,10 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
       console.error(`audit log write failed (post_generated, post=${post.id}):`, e)
     }
 
+    if (probly) {
+      const { freshMarketReply } = await import('@/lib/markets/feed')
+      freshMarketReply(post.id, probly)
+    }
     return db.select().from(generatedPosts).where(eq(generatedPosts.id, post.id)).get()!
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -393,6 +411,11 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
 
 // Smart generation: high score = 2 posts (pure_news speed + AI-chosen), medium = 1 AI-chosen post
 export async function generateSmartPosts(cluster: Cluster) {
+  const existing = db.select().from(generatedPosts).where(eq(generatedPosts.clusterId, cluster.id)).all()
+  if (existing.length) {
+    db.update(eventClusters).set({ status: 'done', postCount: existing.length }).where(eq(eventClusters.id, cluster.id)).run()
+    return existing
+  }
   // Daily cap — enforces settings.daily_post_limit so a runaway cron doesn't burn LLM credits.
   const cap = isOverDailyLimit()
   if (cap.over) {

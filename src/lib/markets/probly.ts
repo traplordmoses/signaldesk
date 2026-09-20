@@ -208,6 +208,12 @@ async function fetchPage(path: string): Promise<string> {
 }
 
 export async function fetchProblyMarkets(): Promise<{ markets: ProblyMarket[]; errors: string[] }> {
+  if (process.env.PROBLY_MARKET_FEED_URL) {
+    try {
+      const { readMarketFeed } = await import('./feed')
+      return { markets: (await readMarketFeed()).filter(m => isOpen(m, Date.now())), errors: [] }
+    } catch (e) { return { markets: [], errors: [String(e)] } }
+  }
   const bySlug = new Map<string, ProblyMarket>()
   const errors: string[] = []
   const now = Date.now()
@@ -331,6 +337,8 @@ export function isMicroMarket(question: string): boolean {
 // and cached permanently. Steady state is a handful of calls a week for newly
 // listed clubs and fighters.
 
+export const PROBLY_CONCEPTS_DDL = `CREATE TABLE IF NOT EXISTS probly_concepts (subject TEXT PRIMARY KEY, groups_json TEXT NOT NULL)`
+
 export const PROBLY_ALIASES_DDL = `
   CREATE TABLE IF NOT EXISTS probly_aliases (
     subject     TEXT PRIMARY KEY,
@@ -353,13 +361,15 @@ Hard rules:
 - NEVER return a word that is ambiguous on its own: "city", "united", "real", "inter", "athletic", "sporting", "fc", "club", "new york", "van", "de", or a bare city name that is also a different club or place. Use the full phrase instead ("man city", "real madrid").
 - Do not invent: only names that genuinely refer to this subject.
 
-Return ONLY JSON: {"results":[{"id":0,"aliases":["..."]}]}`
+For market inputs, also return concepts: one array of aliases per DISTINCT entity. For a Trump Truth Social market use [["donald trump","trump"],["truth social"]]. Synonyms for the same identity MUST share a group. Subject inputs may omit concepts.
+Return ONLY JSON: {"results":[{"id":0,"aliases":["..."],"concepts":[["entity one","synonym"],["entity two"]]}]}`
 
-async function resolveBatch(items: { id: number; kind: 'subject' | 'market'; text: string }[]): Promise<Map<number, string[]>> {
+async function resolveBatch(items: { id: number; kind: 'subject' | 'market'; text: string }[]): Promise<Map<number, { aliases: string[]; concepts: string[][] }>> {
   const key = process.env.ANTHROPIC_API_KEY
   if (!key) throw new Error('ANTHROPIC_API_KEY not set')
   const res = await fetch(ANTHROPIC_URL, {
     method: 'POST',
+    signal: AbortSignal.timeout(30_000),
     headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
     body: JSON.stringify({
       model: process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5-20251001',
@@ -372,15 +382,19 @@ async function resolveBatch(items: { id: number; kind: 'subject' | 'market'; tex
   if (!res.ok) throw new Error(`alias resolution HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`)
   const data = await res.json() as { content?: Array<{ text?: string }> }
   const raw = (data.content?.[0]?.text ?? '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
-  const parsed = JSON.parse(raw) as { results?: Array<{ id: number; aliases: unknown }> }
-  const out = new Map<number, string[]>()
+  const parsed = JSON.parse(raw) as { results?: Array<{ id: number; aliases: unknown; concepts?: unknown }> }
+  const out = new Map<number, { aliases: string[]; concepts: string[][] }>()
   for (const r of parsed.results ?? []) {
     if (!Array.isArray(r.aliases)) continue
     const clean = r.aliases
       .filter((a): a is string => typeof a === 'string')
       .map(a => a.toLowerCase().trim())
       .filter(a => a.length >= 3 && !AMBIGUOUS.has(a))
-    out.set(r.id, [...new Set(clean)])
+    const concepts: string[][] = Array.isArray(r.concepts) ? r.concepts
+      .filter((g): g is string[] => Array.isArray(g) && g.every(a => typeof a === 'string'))
+      .map(g => [...new Set(g.map(a => a.toLowerCase().trim()).filter(a => a.length >= 3 && !AMBIGUOUS.has(a)))])
+      .filter(g => g.length > 0).slice(0, 6) : []
+    out.set(r.id, { aliases: [...new Set(clean)], concepts })
   }
   return out
 }
@@ -396,15 +410,17 @@ const AMBIGUOUS = new Set([
 /** Resolve any subjects not yet cached. Returns how many were newly resolved. */
 export async function resolveMissingAliases(markets: ProblyMarket[]): Promise<{ resolved: number; errors: string[] }> {
   sqlite.exec(PROBLY_ALIASES_DDL)
+  sqlite.exec(PROBLY_CONCEPTS_DDL)
   const known = new Set(
     (sqlite.prepare('SELECT subject FROM probly_aliases').all() as { subject: string }[]).map(r => r.subject),
   )
+  const grouped = new Set((sqlite.prepare('SELECT subject FROM probly_concepts').all() as {subject:string}[]).map(r=>r.subject))
   const pending = new Map<string, 'subject' | 'market'>()
   for (const m of markets) {
     if (isMicroMarket(m.question)) continue
     const kind = m.category === 'sports' ? 'subject' : 'market'
     for (const s of marketSubjects(m.question, m.category)) {
-      if (!known.has(s)) pending.set(s, kind)
+      if (!known.has(s) || (kind === 'market' && !grouped.has(s))) pending.set(s, kind)
     }
   }
 
@@ -419,10 +435,14 @@ export async function resolveMissingAliases(markets: ProblyMarket[]): Promise<{ 
       const result = await resolveBatch(batch)
       const now = Date.now()
       for (const b of batch) {
-        const aliases = result.get(b.id)
+        const resolvedResult = result.get(b.id)
+        const aliases = resolvedResult?.aliases
         // An empty result is still cached, so an unmatchable subject isn't re-asked
         // every hour; it simply never matches.
         insert.run(b.text, b.kind, JSON.stringify(aliases ?? []), now)
+        if (b.kind === 'market') {
+          sqlite.prepare('INSERT OR REPLACE INTO probly_concepts(subject,groups_json) VALUES (?,?)').run(b.text,JSON.stringify(resolvedResult?.concepts ?? []))
+        }
         resolved++
       }
     } catch (e) {
@@ -457,6 +477,11 @@ export interface ProblyMatch {
   liquidity: number
   league: string | null
   category: string
+  marketId: string
+  eventSlug: string
+  fetchedAt: number
+  matchType: 'direct' | 'contextual'
+  matchReason: string
 }
 
 interface CachedMarket extends ProblyMatch {
@@ -465,6 +490,7 @@ interface CachedMarket extends ProblyMatch {
   // a free-text market needs two of its entities.
   subjects: string[][]
   kind: 'subject' | 'market'
+  grouped: boolean
 }
 
 let cache: CachedMarket[] | null = null
@@ -477,15 +503,30 @@ function loadMarkets(): CachedMarket[] {
   try {
     sqlite.exec(PROBLY_MARKETS_DDL)
     sqlite.exec(PROBLY_ALIASES_DDL)
+    sqlite.exec(PROBLY_CONCEPTS_DDL)
+    const conceptsOf = new Map<string,string[][]>()
+    for (const r of sqlite.prepare('SELECT subject,groups_json FROM probly_concepts').all() as {subject:string;groups_json:string}[]) {
+      try { conceptsOf.set(r.subject,JSON.parse(r.groups_json)) } catch { /* invalid grouping abstains */ }
+    }
     const aliasOf = new Map<string, string[]>()
     for (const r of sqlite.prepare('SELECT subject, aliases FROM probly_aliases').all() as { subject: string; aliases: string }[]) {
       try { aliasOf.set(r.subject, (JSON.parse(r.aliases) as string[]).map(foldAccents)) } catch { /* skip */ }
     }
     const rows = sqlite.prepare(`
-      SELECT question, url, price_yes, liquidity, league, category, end_ms FROM probly_markets`).all() as Array<{
-        question: string; url: string; price_yes: number; liquidity: number
+      SELECT slug, event_slug, fetched_at, question, url, price_yes, liquidity, league, category, end_ms FROM probly_markets`).all() as Array<{
+        slug: string; event_slug: string; fetched_at: number; question: string; url: string; price_yes: number; liquidity: number
         league: string | null; category: string; end_ms: number | null
       }>
+    const eventSubjects = new Map<string, string[][]>()
+    for (const r of rows) {
+      if (r.category !== 'sports') continue
+      const group = eventSubjects.get(r.event_slug) ?? []
+      for (const subject of marketSubjects(r.question, r.category)) {
+        const aliases = aliasOf.get(subject) ?? []
+        if (aliases.length && !group.some(g => g.some(a => aliases.includes(a)))) group.push(aliases)
+      }
+      eventSubjects.set(r.event_slug, group)
+    }
     cache = []
     for (const r of rows) {
       if (isMicroMarket(r.question)) continue
@@ -495,7 +536,11 @@ function loadMarkets(): CachedMarket[] {
       if (subjects.length === 0) continue
       cache.push({
         question: r.question, url: r.url, priceYes: r.price_yes, liquidity: r.liquidity,
-        league: r.league, category: r.category, endMs: r.end_ms, subjects,
+        league: r.league, category: r.category, endMs: r.end_ms,
+        subjects: r.category === 'sports' ? (eventSubjects.get(r.event_slug) ?? subjects) : (conceptsOf.get(r.question) ?? subjects),
+        grouped: conceptsOf.has(r.question),
+        marketId: r.slug, eventSlug: r.event_slug, fetchedAt: r.fetched_at,
+        matchType: 'contextual', matchReason: '',
         kind: r.category === 'sports' ? 'subject' : 'market',
       })
     }
@@ -519,29 +564,78 @@ export function resetProblyCache(): void { cache = null; cacheAt = 0 }
  * "Trump" story) is not enough to say a story is about "Will Trump post 80-99
  * Truth Social posts". When several match, the most liquid open market wins.
  */
-export function problyMarketFor(headline: string, summary = '', storyCategory: string | null = null): ProblyMatch | null {
-  const markets = loadMarkets()
-  if (markets.length === 0) return null
-  const haystack = foldAccents(`${headline} ${summary}`.toLowerCase())
-  const now = Date.now()
-  const isSportsStory = storyCategory === 'sports'
+/** Count non-overlapping concepts, never both “Donald Trump” and “Trump”. */
+export function independentHits(text: string, aliases: string[]): string[] {
+  const selected: string[] = []
+  for (const alias of [...new Set(aliases)].sort((a, b) => b.length - a.length)) {
+    if (phraseMatch(text, alias) && !selected.some(s => phraseMatch(s, alias))) selected.push(alias)
+  }
+  return selected
+}
 
+export function problyMarketFor(headline: string, summary = '', storyCategory: string | null = null): ProblyMatch | null {
+  const now = Date.now()
+  const head = foldAccents(headline.toLowerCase())
+  const haystack = foldAccents(`${headline} ${summary}`.toLowerCase())
   let best: CachedMarket | null = null
-  for (const m of markets) {
+  let bestRank = -1
+  for (const m of loadMarkets()) {
+    // Old catalogues can support discovery, but must not create live-market claims.
+    if (now - m.fetchedAt > 2 * 60 * 60_000 || m.fetchedAt > now + 60_000) continue
     if (m.endMs != null && m.endMs <= now) continue
-    let hit = false
+    let rank = 0
+    let reason = ''
     if (m.kind === 'subject') {
-      if (!isSportsStory) continue
-      hit = m.subjects.some(aliases => aliases.some(a => phraseMatch(haystack, a)))
+      if (storyCategory !== 'sports') continue
+      // Avoid selecting totals/spreads from a generic team mention.
+      if (/\b(?:o\/u|spread|handicap|over\/under|total)\b/i.test(m.question)) continue
+      const date = (m.eventSlug.match(/\d{4}-\d{2}-\d{2}/) ?? m.question.match(/\d{4}-\d{2}-\d{2}/))?.[0]
+      const fixtureAt = date ? Date.parse(date + 'T23:59:59Z') : m.endMs
+      if (!fixtureAt || fixtureAt < now || fixtureAt - now > 72 * 60 * 60_000) continue
+      const mentionedDates: string[] = haystack.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? []
+      if (date && mentionedDates.length && !mentionedDates.includes(date)) continue
+      const headHits = m.subjects.filter(a => a.some(alias => phraseMatch(head, alias))).length
+      if (!headHits) continue // a city or former club in context is not the story's subject
+      const resultStory = /\b(won|beat|defeated|victory|cruise[sd]? past|result|scored|first-ever)\b/.test(head)
+      const lineup = /\b(line-?up|squad|ruled out|injur(?:ed|y)|suspend(?:ed|sion)|withdraws?|withdrawn)\b/.test(head)
+      const allParticipants = m.subjects.length >= 2 && m.subjects.every(a => a.some(alias => phraseMatch(head, alias)))
+      if (allParticipants && !resultStory) { rank = 3; reason = 'Both fixture participants in the headline; active fixture within 72h' }
+      else if (lineup && !resultStory && headHits === 1) { rank = 1; reason = 'Team availability update; contextual relevance to upcoming fixture' }
+      else continue
+      // A named competition must agree when the headline identifies one.
+      const competitions = ['champions league', 'europa league', 'premier league', 'la liga', 'bundesliga', 'ligue 1', 'serie a']
+      if (competitions.some(c => head.includes(c) && c !== m.league?.toLowerCase())) continue
     } else {
-      const entities = m.subjects.flat()
-      const need = Math.min(2, entities.length)
-      hit = entities.filter(e => phraseMatch(haystack, e)).length >= need
+      const hits = m.grouped
+        ? m.subjects.flatMap(g => { const hit = independentHits(haystack,g)[0]; return hit ? [hit] : [] })
+        : independentHits(haystack, m.subjects.flat())
+      if (independentHits(haystack,hits).length < 2 || !hits.some(a => phraseMatch(head, a))) continue
+      if (/truth social/i.test(m.question) && !/truth social/i.test(haystack)) continue
+      rank = 2
+      reason = `Distinct market concepts: ${hits.join(', ')}`
     }
-    if (!hit) continue
-    if (!best || m.liquidity > best.liquidity) best = m
+    if (rank > bestRank || (rank === bestRank && (!best || m.liquidity > best.liquidity))) {
+      best = { ...m, matchType: rank === 3 ? 'direct' : 'contextual', matchReason: reason }
+      bestRank = rank
+    }
   }
   if (!best) return null
-  const { question, url, priceYes, liquidity, league, category } = best
-  return { question, url, priceYes, liquidity, league, category }
+  const { question, url, priceYes, liquidity, league, category, marketId, eventSlug, fetchedAt, matchType, matchReason } = best
+  return { question, url, priceYes, liquidity, league, category, marketId, eventSlug, fetchedAt, matchType, matchReason }
+}
+
+/** Probly events determine the discovery watchlist; collapse multiple contracts per event. */
+export function problyWatchTopics(limit = 8): string[] {
+  const seen = new Set<string>()
+  const topics: string[] = []
+  const now = Date.now()
+  for (const m of [...loadMarkets()].sort((a, b) => b.liquidity - a.liquidity)) {
+    if (seen.has(m.eventSlug) || now - m.fetchedAt > 2 * 3600_000 || (m.endMs && m.endMs <= now)) continue
+    seen.add(m.eventSlug)
+    const entities = m.subjects.map(a => a[0]).filter(Boolean)
+    if (!entities.length) continue
+    topics.push(entities.slice(0, 3).map(e => `"${e.replace(/"/g, '')}"`).join(' '))
+    if (topics.length >= limit) break
+  }
+  return topics
 }

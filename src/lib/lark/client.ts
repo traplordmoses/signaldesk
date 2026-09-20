@@ -19,6 +19,7 @@ export async function getTenantAccessToken(): Promise<string> {
 
   const res = await fetch(`${LARK_BASE}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
   })
@@ -61,6 +62,7 @@ export async function larkPost(path: string, body: unknown): Promise<LarkApiResp
 
   const res = await fetch(`${LARK_BASE}${path}`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
@@ -79,6 +81,7 @@ export async function larkPatch(path: string, body: unknown): Promise<LarkApiRes
 
   const res = await fetch(`${LARK_BASE}${path}`, {
     method: 'PATCH',
+    signal: AbortSignal.timeout(15_000),
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',

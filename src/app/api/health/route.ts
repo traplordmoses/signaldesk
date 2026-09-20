@@ -1,6 +1,6 @@
 export const dynamic = 'force-dynamic'
 import { NextResponse } from 'next/server'
-import { db } from '@/lib/db'
+import { db, sqlite } from '@/lib/db'
 import { newsSources, newsItems, eventClusters, generatedPosts } from '@/lib/db/schema'
 import { gt } from 'drizzle-orm'
 
@@ -19,6 +19,11 @@ export async function GET() {
     return NextResponse.json({
       ok: true,
       ts: Date.now(),
+      newsroom: {
+        delivery: sqlite.prepare("SELECT COUNT(*) pending,MIN(created_at) oldest FROM delivery_outbox WHERE state IN ('pending','sending')").get(),
+        failedDeliveries: (sqlite.prepare("SELECT COUNT(*) n FROM delivery_outbox WHERE state='failed'").get() as {n:number}).n,
+        heartbeat: sqlite.prepare('SELECT name,last_success FROM newsroom_heartbeat').all(),
+      },
       stats: {
         sources_active: sourcesActive,
         items_last_hour: recentItems,

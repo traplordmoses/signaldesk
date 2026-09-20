@@ -91,7 +91,8 @@ describe('marketSubjects — the four sports templates', () => {
 // ── Matching ────────────────────────────────────────────────────────────────
 
 describe('problyMarketFor', () => {
-  const FUTURE = Date.now() + 7 * 86_400_000
+  const FUTURE = Date.now() + 2 * 86_400_000
+  const date = new Date(Date.now() + 86_400_000).toISOString().slice(0,10)
   const PAST = Date.now() - 86_400_000
 
   beforeAll(() => {
@@ -103,7 +104,7 @@ describe('problyMarketFor', () => {
     const a = sqlite.prepare('INSERT OR REPLACE INTO probly_aliases (subject, kind, aliases, resolved_at) VALUES (?, ?, ?, ?)')
     const now = Date.now()
     const market = (slug: string, q: string, cat: string, league: string | null, liq: number, end: number) =>
-      m.run(slug, slug, q, cat, league, 0.5, liq, end, `https://www.probly.com/en/event/${slug}`, now)
+      m.run(slug, slug, end > Date.now() && cat === 'sports' ? q.replace(/2026-09-\d{2}/g,date) : q, cat, league, 0.5, liq, end, `https://www.probly.com/en/event/${slug}`, now)
 
     market('bun-bay', 'Will FC Bayern München win on 2026-09-18?', 'sports', 'Bundesliga', 900_000, FUTURE)
     market('fl1-asm', 'Will AS Monaco FC win on 2026-09-18?', 'sports', 'Ligue 1', 300_000, FUTURE)
@@ -121,8 +122,8 @@ describe('problyMarketFor', () => {
     resetProblyCache()
   })
 
-  it('links a sports story to its fixture', () => {
-    expect(problyMarketFor('Bayern Munich cruise past Union Berlin', '', 'sports')?.league).toBe('Bundesliga')
+  it('does not link a completed result to an upcoming fixture', () => {
+    expect(problyMarketFor('Bayern Munich cruise past Union Berlin', '', 'sports')).toBeNull()
   })
 
   it('matches through accents in the headline', () => {
@@ -134,9 +135,9 @@ describe('problyMarketFor', () => {
     expect(problyMarketFor('Monaco royal family announces new charity', '', 'pop_culture')).toBeNull()
   })
 
-  it('picks the most liquid market when a story names two clubs', () => {
+  it('abstains rather than choosing a liquid but unproven fixture', () => {
     const m = problyMarketFor('Real Madrid beat Barcelona in El Clasico', '', 'sports')
-    expect(m?.question).toBe('Will FC Barcelona win on 2026-09-19?')
+    expect(m).toBeNull()
   })
 
   it('never links a market that has already closed', () => {

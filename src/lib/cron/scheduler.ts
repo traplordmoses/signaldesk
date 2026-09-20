@@ -1,505 +1,208 @@
 import cron from 'node-cron'
 import { db, sqlite } from '@/lib/db'
-import { eventClusters, settings, generatedPosts } from '@/lib/db/schema'
-import { eq, and, gt, isNull, inArray, desc } from 'drizzle-orm'
+import { eventClusters, generatedPosts, settings } from '@/lib/db/schema'
+import { and, eq, gt, desc, inArray } from 'drizzle-orm'
 import { isWorthyHeadline } from '@/lib/ai/headline-filter'
-import { topicalTokens, keywordOverlap } from '@/lib/news/clusterer'
 import { detectCategory } from '@/lib/news/scorer'
+import { topicalTokens, keywordOverlap } from '@/lib/news/clusterer'
 import { TARGET_MIX, bucketForCategory } from '@/lib/mix'
+import { evidenceFor } from '@/lib/editorial/evidence'
+import { laneFor, decayedScore, routineDue } from '@/lib/editorial/priority'
+import { problyMarketFor } from '@/lib/markets/probly'
+import { drainOutbox } from '@/lib/lark/outbox'
 
+const running = new Set<string>()
+const tasks: ReturnType<typeof cron.schedule>[] = []
 let started = false
+let stopping = false
+let pipelineTimer: ReturnType<typeof setTimeout> | undefined
+let pipelineDirty = false
 
-// Per-task overlap guards. Without these, a slow run of `runFetch` would let the
-// next 5-min tick stack on top of itself — eventually saturating Together AI / DB.
-const running = { fetch: false, generate: false, prune: false, markets: false, feedback: false }
-
-const AUDIT_LOG_RETENTION_DAYS  = 30
-const NEWS_ITEM_RETENTION_DAYS  = 14   // only items already isProcessed=1
-const PRICE_RETENTION_HOURS     = 24   // (forward-compat — not used yet)
-
-async function runPrune() {
-  if (running.prune) {
-    console.warn('[cron] prune skipped — previous run still in progress')
-    return
-  }
-  running.prune = true
-  const startedAt = Date.now()
+async function guarded(name: string, fn: () => Promise<void>) {
+  if (stopping || running.has(name)) return
+  running.add(name)
+  sqlite.prepare(`INSERT INTO newsroom_heartbeat(name,last_started) VALUES (?,?)
+    ON CONFLICT(name) DO UPDATE SET last_started=excluded.last_started`).run(name, Date.now())
   try {
-    const auditCutoff = Date.now() - AUDIT_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000
-    const itemsCutoff = Date.now() - NEWS_ITEM_RETENTION_DAYS * 24 * 60 * 60 * 1000
-
-    const audit = sqlite.prepare('DELETE FROM audit_log WHERE created_at < ?').run(auditCutoff)
-    const items = sqlite.prepare('DELETE FROM news_items WHERE ingested_at < ? AND is_processed = 1').run(itemsCutoff)
-
-    // VACUUM reclaims disk after large deletes. Cheap on a healthy SQLite.
-    try { sqlite.exec('VACUUM') } catch (e) {
-      console.error('[cron] VACUUM failed:', e)
-    }
-
-    console.log(`[cron] prune: -${audit.changes} audit, -${items.changes} news_items (${Date.now() - startedAt}ms)`)
+    await fn()
+    sqlite.prepare('UPDATE newsroom_heartbeat SET last_success=?,last_error=NULL WHERE name=?').run(Date.now(), name)
   } catch (e) {
-    console.error('[cron] prune failed:', e)
-  } finally {
-    running.prune = false
-  }
+    console.error(`[cron] ${name}:`, e)
+    sqlite.prepare('UPDATE newsroom_heartbeat SET last_error=? WHERE name=?').run(String(e).slice(0, 500), name)
+  } finally { running.delete(name) }
 }
 
-async function runFetch() {
-  if (running.fetch) {
-    console.warn('[cron] fetch skipped — previous run still in progress')
-    return
-  }
-  running.fetch = true
-  const startedAt = Date.now()
-  try {
-    const { fetchAllSources } = await import('@/lib/news/fetcher')
-    const { clusterNewItems } = await import('@/lib/news/clusterer')
-    const { ingested, errors } = await fetchAllSources()
-    const clustered = await clusterNewItems()
-    const durMs = Date.now() - startedAt
-    console.log(`[cron] fetch: +${ingested} articles, +${clustered} clusters, ${errors} errors (${durMs}ms)`)
-    if (durMs > 4 * 60 * 1000) {
-      console.warn(`[cron] fetch took ${durMs}ms — approaching the 5-min tick interval`)
-    }
-  } catch (e) {
-    console.error('[cron] fetch failed:', e)
-  } finally {
-    running.fetch = false
-  }
+export function requestPipeline() {
+  pipelineDirty = true
+  if (pipelineTimer || stopping) return
+  pipelineTimer = setTimeout(() => {
+    pipelineTimer = undefined
+    void guarded('pipeline', async () => {
+      do {
+        pipelineDirty = false
+        const { clusterNewItems } = await import('@/lib/news/clusterer')
+        await clusterNewItems({ rateNovelty: false })
+        await runAutoGenerate()
+        await drainOutbox()
+      } while (pipelineDirty && !stopping)
+    }).finally(() => { if (pipelineDirty && !stopping) requestPipeline() })
+  }, 200)
 }
 
-// Pending posts that haven't been approved/rejected after this many ms get
-// flipped to status='expired' so they drop out of the dashboard's Pending
-// Review count. 8h matches the natural decay of BREAKING/JUST IN framing —
-// a card sitting unapproved past one work shift is almost certainly too
-// stale to tweet as breaking news. The card stays in Lark chat (we don't
-// patch it visually); the handler still accepts a manual approve/reject
-// click on it if a reviewer decides it's still worth posting.
-const PENDING_TTL_MS = 8 * 60 * 60 * 1000
-
-// Target post mix + bucket mapping live in lib/mix (shared with category-report).
-// We steer selection toward the target by what a story is ABOUT (scorer
-// content-category) — under-served buckets get a boost, over-served ones a
-// penalty, measured against the last day of posts.
-const MIX_WINDOW_MS = 24 * 60 * 60 * 1000
-// Score points per unit of (target − actual) share. Was 12, which was too weak
-// to hold the mix: scores cap at 10 and most candidates sit at 9.7-10, so a
-// bucket running 9 points over target lost only ~1.1 and kept winning. That is
-// how tech_ai reached 24% of drafts against a 15% target after the AI boost
-// landed. At 20 the same overshoot costs ~1.8, enough to hand the slot on.
-const TARGET_BIAS_SCALE = 20
-
-// Selection-time preference for a story that maps to a live Probly market. The
-// scorer's +2 gets such stories over the gate, but relevance caps at 10, so it
-// cannot separate them from everything else already sitting at 9.7-10. This is
-// uncapped, so among equally strong candidates the one with a market wins.
-const PROBLY_SELECTION_BONUS = 1.5
-
-// Same reasoning for catchiness: novelty lifts an unusual story over the gate at
-// cluster time, but among candidates that all sit at 9.7-10 it needs an uncapped
-// nudge to actually be picked.
-const NOVELTY_SELECTION_BONUS = 1.5
-function bucketOf(sourceCategory: string, headline: string, summaries: string | null): string {
-  return bucketForCategory(detectCategory(headline, summariesText(summaries)), sourceCategory)
+/** Persisted lease survives restarts; one job for each event version. */
+export function claimGeneration(clusterId: string, now = Date.now()): boolean {
+  return sqlite.transaction(() => {
+    sqlite.prepare(`INSERT OR IGNORE INTO generation_jobs(cluster_id,available_at) VALUES (?,?)`).run(clusterId, now)
+    return sqlite.prepare(`UPDATE generation_jobs SET state='running',lease_until=?,attempts=attempts+1
+      WHERE cluster_id=? AND attempts<3 AND ((state='pending' AND available_at<=?) OR (state='running' AND lease_until<=?))`)
+      .run(now + 180_000, clusterId, now, now).changes === 1
+  })()
 }
 
-// Near-duplicate guard: skip a candidate that is topically too similar to a
-// same-category post drafted within DEDUP_WINDOW_MS. We compare real content
-// tokens (proper nouns included) and require BOTH a minimum shared-token count
-// and a high overlap ratio, so "Messi breaks the WC scoring record" twice is
-// caught, but two different World Cup matches (which share only "world cup 2026")
-// are not. Tokens come from headline + summaries.
-const DEDUP_WINDOW_MS = 2 * 60 * 60 * 1000  // 2h
-const DEDUP_MIN_SHARED = 4    // ≥4 shared topical tokens, AND…
-const DEDUP_MIN_COEF = 0.5    // …≥50% of the smaller token set overlaps
-
-// Flatten an event_cluster's constituent_summaries JSON into one text blob for
-// keyword extraction.
-function summariesText(json: string | null): string {
-  try { return (JSON.parse(json ?? '[]') as string[]).join(' ') } catch { return '' }
-}
-
-function expireStalePendingPosts(): number {
-  const cutoff = Date.now() - PENDING_TTL_MS
-  const stale = db.select()
-    .from(generatedPosts)
-    .where(
-      and(
-        eq(generatedPosts.status, 'pending'),
-        gt(generatedPosts.createdAt, 0),  // sanity bound
-      )
-    )
-    .all()
-    .filter(p => p.createdAt < cutoff)
-
-  if (stale.length === 0) return 0
-
-  const now = Date.now()
-  for (const post of stale) {
-    db.update(generatedPosts)
-      .set({ status: 'expired', updatedAt: now })
-      .where(eq(generatedPosts.id, post.id))
-      .run()
-  }
-  console.log(`[cron] expired ${stale.length} pending post(s) older than ${PENDING_TTL_MS / 3600000}h`)
-  return stale.length
-}
-
-async function runAutoGenerate() {
-  if (running.generate) {
-    console.warn('[cron] auto-generate skipped — previous run still in progress')
-    return
-  }
-  running.generate = true
-  const startedAt = Date.now()
-  try {
-    // Drain stale pending posts before generating new ones — keeps the
-    // dashboard's Pending Review count tracking what's actually actionable.
-    expireStalePendingPosts()
-
+export async function runAutoGenerate() {
+  return guarded('generate', async () => {
+    const now = Date.now()
     const config = db.select().from(settings).where(eq(settings.id, 'singleton')).get()
-    const threshold = config?.autoGenerateThreshold ?? 6.5
-    const sixHoursAgo = Date.now() - 6 * 60 * 60 * 1000
-
-    // Pace delivery: if the last post went out less than post_cooldown_minutes
-    // ago, skip this cycle. Spreads posts evenly across the day instead of
-    // bursting to the daily cap and then going silent for hours. This (not the
-    // daily cap) is the real cadence knob — set post_cooldown_minutes to taste.
-    const cooldownMin = config?.postCooldownMinutes ?? 15
-    const lastPost = db.select({ createdAt: generatedPosts.createdAt })
-      .from(generatedPosts)
-      .orderBy(desc(generatedPosts.createdAt))
-      .limit(1)
-      .get()
-    if (lastPost?.createdAt && Date.now() - lastPost.createdAt < cooldownMin * 60_000) {
-      console.log(`[cron] auto-generate: paced — ${Math.round((Date.now() - lastPost.createdAt) / 60000)}m since last post (cooldown ${cooldownMin}m)`)
-      return
+    if (!config || config.larkEnabled !== 1) return
+    sqlite.prepare("UPDATE generated_posts SET status='expired',updated_at=? WHERE status='pending' AND created_at<?")
+      .run(now, now - 8 * 3600_000)
+    // Recover interrupted work without re-generating a post already committed before a crash.
+    sqlite.prepare(`UPDATE event_clusters SET status='new' WHERE status='generation_failed' AND id IN
+      (SELECT cluster_id FROM generation_jobs WHERE attempts<3 AND ((state='pending' AND available_at<=?) OR (state='running' AND lease_until<=?)))`).run(now, now)
+    const recentPosts = db.select().from(generatedPosts).where(gt(generatedPosts.createdAt, now - 24 * 3600_000)).all()
+    const limit = config.dailyPostLimit ?? 130
+    if (recentPosts.length >= limit) return
+    const clusters = recentPosts.length ? db.select().from(eventClusters).where(inArray(eventClusters.id, recentPosts.map(p => p.clusterId))).all() : []
+    const buckets = new Map<string, number>()
+    for (const c of clusters) {
+      const e = evidenceFor(c)
+      const bucket = bucketForCategory(detectCategory(c.canonicalHeadline, e?.text ?? ''), c.category)
+      buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1)
     }
-
-    const rawCandidates = db.select()
-      .from(eventClusters)
-      .where(
-        and(
-          eq(eventClusters.status, 'new'),
-          eq(eventClusters.postCount, 0),
-          gt(eventClusters.firstSeenAt, sixHoursAgo)
-        )
-      )
-      .all()
-      .filter(c => (c.relevanceScore ?? 0) >= threshold)
-
-    // Pre-LLM headline filter — drops opinion pieces, recaps, podcasts, etc.
-    // before they cost an Anthropic call. Skipped clusters are marked
-    // 'low_signal_skipped' so they don't re-qualify on the next tick.
-    const candidates: typeof rawCandidates = []
-    let skippedLowSignal = 0
-    for (const c of rawCandidates) {
-      if (isWorthyHeadline(c.canonicalHeadline)) {
-        candidates.push(c)
-      } else {
-        skippedLowSignal++
-        db.update(eventClusters)
-          .set({ status: 'low_signal_skipped', lastUpdatedAt: Date.now() })
-          .where(eq(eventClusters.id, c.id))
-          .run()
-      }
-    }
-
-    if (candidates.length === 0) {
-      if (skippedLowSignal > 0) {
-        console.log(`[cron] auto-generate: 0 candidates (${skippedLowSignal} skipped as low-signal)`)
-      }
-      return
-    }
-
-    // Target-mix steering: bias selection toward the recommended category spread
-    // by what each story is ABOUT (scorer category), not its feed. Under-served
-    // buckets get a boost, over-served ones a penalty, vs the last 24h of posts.
-    const mixCutoff = Date.now() - MIX_WINDOW_MS
-    const recentMixIds = db.select({ clusterId: generatedPosts.clusterId })
-      .from(generatedPosts)
-      .where(gt(generatedPosts.createdAt, mixCutoff))
-      .all()
-      .map(r => r.clusterId)
-    const bucketCount = new Map<string, number>()
-    let mixTotal = 0
-    if (recentMixIds.length > 0) {
-      const recentMix = db.select({
-        category: eventClusters.category,
-        canonicalHeadline: eventClusters.canonicalHeadline,
-        constituentSummaries: eventClusters.constituentSummaries,
-      }).from(eventClusters).where(inArray(eventClusters.id, recentMixIds)).all()
-      for (const c of recentMix) {
-        const b = bucketOf(c.category, c.canonicalHeadline, c.constituentSummaries)
-        bucketCount.set(b, (bucketCount.get(b) ?? 0) + 1)
-        mixTotal++
-      }
-    }
-    const { problyMarketFor } = await import('@/lib/markets/probly')
-    const hasProbly = new Map<string, boolean>()
-    for (const c of candidates) {
-      const text = summariesText(c.constituentSummaries)
-      hasProbly.set(c.id, problyMarketFor(c.canonicalHeadline, text, detectCategory(c.canonicalHeadline, text)) != null)
-    }
-    const { noveltyFor, NOVELTY_SELECTION_THRESHOLD } = await import('@/lib/ai/novelty')
+    const laneOfPost = (signals: string | null) => { try { return JSON.parse(signals ?? '{}').lane } catch { return 'routine' } }
+    const urgentPosts = recentPosts.filter(p => laneOfPost(p.signals) === 'urgent')
+    const lastRoutine = recentPosts.filter(p => laneOfPost(p.signals) !== 'urgent').sort((a,b) => b.createdAt-a.createdAt)[0]
+    const urgentBudget = urgentPosts.filter(p => p.createdAt > now - 3600_000).length < 3
+      && !urgentPosts.some(p => p.createdAt > now - 60_000)
+    const paced = routineDue(lastRoutine?.createdAt ?? null, config.postCooldownMinutes ?? 15, now)
+    const candidates = db.select().from(eventClusters).where(and(eq(eventClusters.status, 'new'), eq(eventClusters.postCount, 0), gt(eventClusters.firstSeenAt, now - 6 * 3600_000))).all()
+    const { noveltyFor } = await import('@/lib/ai/novelty')
     const novelty = noveltyFor(candidates.map(c => c.id))
-    const effectiveScore = (c: typeof candidates[number]) => {
-      const b = bucketOf(c.category, c.canonicalHeadline, c.constituentSummaries)
-      const target = TARGET_MIX[b] ?? 0
-      const actual = mixTotal > 0 ? (bucketCount.get(b) ?? 0) / mixTotal : target
-      const probly = hasProbly.get(c.id) ? PROBLY_SELECTION_BONUS : 0
-      const catchy = (novelty.get(c.id) ?? 0) >= NOVELTY_SELECTION_THRESHOLD ? NOVELTY_SELECTION_BONUS : 0
-      return (c.relevanceScore ?? 0) + TARGET_BIAS_SCALE * (target - actual) + probly + catchy
-    }
-
-    // Best first by target-adjusted score, tie-broken by recency (newer first).
-    candidates.sort((a, b) => {
-      const d = effectiveScore(b) - effectiveScore(a)
-      if (d !== 0) return d
-      return (b.firstSeenAt ?? 0) - (a.firstSeenAt ?? 0)
-    })
-
-    // Per-cycle cap. Without this, a backlog (e.g. just after the daily cap
-    // resets) dumps every queued candidate into the chat in one tick — 12
-    // cards at once. Cap at 2 per cycle: the rest stay status='new' and
-    // qualify on the next tick (5 min later). Combined with the 5-min cron
-    // interval this paces delivery at ~1 card every 2-3 minutes instead of
-    // batches landing all at once.
-    // Near-duplicate guard: don't draft a story topically similar to one already
-    // drafted in the SAME category within the last hour. The clusterer merges
-    // look-alikes inside one batch, but a follow-up that ingests a few cycles
-    // later forms a fresh cluster — this stops it (or a same-category twin)
-    // re-posting in the same hour. Reuses the clusterer's keyword-overlap logic.
-    const dedupCutoff = Date.now() - DEDUP_WINDOW_MS
-    const recentDraftIds = db.select({ clusterId: generatedPosts.clusterId })
-      .from(generatedPosts)
-      .where(gt(generatedPosts.createdAt, dedupCutoff))
-      .all()
-      .map(r => r.clusterId)
-    const recentStories = recentDraftIds.length
-      ? db.select({
-          category: eventClusters.category,
-          canonicalHeadline: eventClusters.canonicalHeadline,
-          constituentSummaries: eventClusters.constituentSummaries,
+    const ranked = candidates.flatMap(c => {
+      if (!isWorthyHeadline(c.canonicalHeadline)) {
+        db.update(eventClusters).set({ status: 'low_signal_skipped' }).where(eq(eventClusters.id, c.id)).run()
+        return []
+      }
+      const e = evidenceFor(c)
+      if (!e || now - e.publishedAt > 4 * 3600_000) return []
+      const category = detectCategory(c.canonicalHeadline, e.text)
+      const match = problyMarketFor(c.canonicalHeadline, e.text, category)
+      const lane = laneFor(e, match != null, c.riskLevel, now)
+      if (lane === 'urgent' ? !urgentBudget : !paced) return []
+      if ((c.relevanceScore ?? 0) < (config.autoGenerateThreshold ?? 6.5) && lane !== 'urgent') return []
+      // Routine generation cannot exhaust the last 10% of the daily budget reserved for urgent news.
+      if (lane !== 'urgent' && recentPosts.length >= Math.floor(limit * .9)) return []
+      if (!c.parentClusterId) {
+        const kw = topicalTokens(c.canonicalHeadline)
+        const dup = clusters.some(prev => {
+          if (!recentPosts.some(p => p.clusterId === prev.id && p.createdAt > now - 2 * 3600_000)) return false
+          const other = topicalTokens(prev.canonicalHeadline)
+          return keywordOverlap(kw, other) >= 4 && keywordOverlap(kw, other) / Math.max(1, Math.min(kw.size, other.size)) >= .65
         })
-        .from(eventClusters)
-        .where(inArray(eventClusters.id, recentDraftIds))
-        .all()
-        .map(s => ({ category: s.category, kw: topicalTokens(`${s.canonicalHeadline} ${summariesText(s.constituentSummaries)}`) }))
-      : []
-    const candKwCache = new Map<string, Set<string>>()
-    const isNearDup = (c: typeof candidates[number]): boolean => {
-      if (recentStories.length === 0) return false
-      let ck = candKwCache.get(c.id)
-      if (!ck) {
-        ck = topicalTokens(`${c.canonicalHeadline} ${summariesText(c.constituentSummaries)}`)
-        candKwCache.set(c.id, ck)
+        if (dup) return []
       }
-      return recentStories.some(r => {
-        if (r.category !== c.category) return false
-        const shared = keywordOverlap(ck!, r.kw)
-        if (shared < DEDUP_MIN_SHARED) return false
-        return shared / Math.min(ck!.size, r.kw.size || 1) >= DEDUP_MIN_COEF
-      })
-    }
-
-    const PER_CYCLE_CAP = 1
-    // Editorial diversity: don't draft two same-category cards in one cycle.
-    // Walk the (diversity-adjusted) score order, picking the first of each unseen
-    // category and skipping near-duplicates of recent posts. Then top up by rank.
-    const trimmed: typeof candidates = []
-    const usedCategories = new Set<string>()
-    let dupSkipped = 0
-    for (const c of candidates) {
-      if (trimmed.length >= PER_CYCLE_CAP) break
-      if (isNearDup(c)) { dupSkipped++; continue }
-      if (usedCategories.has(c.category)) continue
-      trimmed.push(c)
-      usedCategories.add(c.category)
-    }
-    for (const c of candidates) {
-      if (trimmed.length >= PER_CYCLE_CAP) break
-      if (trimmed.includes(c)) continue
-      if (isNearDup(c)) continue
-      trimmed.push(c)
-    }
-    const deferred = candidates.length - trimmed.length
-
-    console.log(`[cron] auto-generate: ${candidates.length} candidates${skippedLowSignal ? ` (${skippedLowSignal} skipped as low-signal)` : ''}${dupSkipped ? ` (${dupSkipped} near-dup skipped)` : ''}${deferred > 0 ? ` — generating top ${trimmed.length}, deferring ${deferred} to next cycle` : ''}`)
-
+      const bucket = bucketForCategory(category, c.category)
+      const target = TARGET_MIX[bucket] ?? 0
+      const actual = clusters.length ? (buckets.get(bucket) ?? 0) / clusters.length : target
+      const score = decayedScore(c.relevanceScore ?? 0, e.publishedAt, now) + 20 * (target - actual)
+        + (match ? 1.5 : 0) + ((novelty.get(c.id) ?? 0) >= 8 ? 1.5 : 0)
+      return [{ c, score, lane, publishedAt: e.publishedAt }]
+    }).sort((a,b) => Number(b.lane === 'urgent') - Number(a.lane === 'urgent') || b.score-a.score || b.publishedAt-a.publishedAt)
     const { generateSmartPosts } = await import('@/lib/ai/generator')
-
-    for (const cluster of trimmed) {
+    for (const { c } of ranked) {
+      if (!claimGeneration(c.id, now)) continue
       try {
-        const posts = await generateSmartPosts(cluster)
-        console.log(`[cron] generated ${posts.length} posts for: ${cluster.canonicalHeadline.slice(0, 50)}`)
-
-        if (
-          config?.larkEnabled === 1 &&
-          process.env.LARK_APP_ID &&
-          process.env.LARK_APP_SECRET &&
-          process.env.LARK_REVIEW_CHAT_ID
-        ) {
-          try {
-            const { sendClusterToLark } = await import('@/lib/lark/messages')
-            // Only send posts that have NEVER been delivered to Lark. Without this
-            // filter, any cluster that gets re-selected (status reverted, re-clustered,
-            // generation failed previously, etc.) re-sends every post it ever produced
-            // — that's how the Trump-approval card shipped 12 times in 5 hours.
-            const unsent = db.select()
-              .from(generatedPosts)
-              .where(and(
-                eq(generatedPosts.clusterId, cluster.id),
-                isNull(generatedPosts.larkSentAt),
-              ))
-              .all()
-            if (unsent.length === 0) {
-              console.log(`[cron] no unsent posts for cluster ${cluster.id} — skipping send`)
-            } else {
-              const messageId = await sendClusterToLark(cluster, unsent)
-              if (messageId) {
-                for (const p of unsent) {
-                  db.update(generatedPosts)
-                    .set({ larkMessageId: messageId, larkSentAt: Date.now() })
-                    .where(eq(generatedPosts.id, p.id))
-                    .run()
-                }
-                console.log(`[cron] sent ${unsent.length} post(s) to Lark: ${cluster.canonicalHeadline.slice(0, 50)}`)
-              } else {
-                console.error(`[cron] Lark send returned no messageId for cluster ${cluster.id} — posts left unsent for retry`)
-              }
-            }
-          } catch (larkErr) {
-            console.error('[cron] Lark send failed:', larkErr)
-          }
-        }
+        const posts = await generateSmartPosts(c)
+        if (!posts.length) throw new Error('Draft generation failed; see generation audit')
+        sqlite.prepare("UPDATE generation_jobs SET state='done',lease_until=NULL,last_error=NULL WHERE cluster_id=?").run(c.id)
       } catch (e) {
-        console.error('[cron] generate failed for cluster', cluster.id, e)
+        const job = sqlite.prepare('SELECT attempts FROM generation_jobs WHERE cluster_id=?').get(c.id) as { attempts: number }
+        sqlite.prepare("UPDATE generation_jobs SET state=?,available_at=?,lease_until=NULL,last_error=? WHERE cluster_id=?")
+          .run(job.attempts >= 3 ? 'failed' : 'pending', Date.now() + 60_000 * 2 ** job.attempts, String(e).slice(0,500), c.id)
       }
+      break
     }
-  } catch (e) {
-    console.error('[cron] auto-generate run failed:', e)
-  } finally {
-    const durMs = Date.now() - startedAt
-    if (durMs > 4 * 60 * 1000) {
-      console.warn(`[cron] auto-generate took ${durMs}ms — approaching the 5-min tick interval`)
-    }
-    running.generate = false
-  }
+  })
 }
 
-// Refresh the prediction-market relevance signal — pulls top markets/events
-// from Polymarket + Kalshi, runs LLM topic extraction on any new ones, and
-// refreshes the cached entity → volume map used by `scoreItem` to apply a
-// relevance boost. Runs hourly + once on startup. Failures are non-fatal:
-// the scorer falls back to base scoring with no boost when the cache is empty.
-async function runMarketsRefresh() {
-  if (running.markets) {
-    console.warn('[cron] markets refresh skipped — previous run still in progress')
-    return
-  }
-  running.markets = true
-  try {
+async function fetchNews() {
+  await guarded('fetch', async () => {
+    const { fetchAllSources } = await import('@/lib/news/fetcher')
+    const r = await fetchAllSources(requestPipeline)
+    console.log(`[cron] fetch: ${r.ingested} ingested, ${r.errors} errors`)
+    requestPipeline()
+  })
+}
+async function refreshMarkets() {
+  await guarded('probly', async () => {
+    const { refreshProblyMarkets } = await import('@/lib/markets/probly')
+    const r = await refreshProblyMarkets()
+    if (r.kept || r.errors.length) throw new Error(`Probly refresh: ${r.errors.join('; ')}`)
+  })
+  await guarded('competitor-markets', async () => {
     const { refreshMarketTopics } = await import('@/lib/markets')
-    const r = await refreshMarketTopics()
-    console.log(`[cron] markets refresh: poly=${r.polymarket} kalshi=${r.kalshi} new_extractions=${r.newExtractions}${r.errors.length ? ` errors=${r.errors.length}` : ''}`)
-    if (r.errors.length > 0) {
-      for (const err of r.errors.slice(0, 3)) console.warn(`[cron] markets:`, err)
-    }
-
-    try {
-      const { refreshProblyMarkets } = await import('@/lib/markets/probly')
-      const p = await refreshProblyMarkets()
-      console.log(`[cron] probly refresh: ${p.stored} markets${p.kept ? ' (KEPT previous list — fetch failed or came back thin)' : ''}, ${p.resolved ?? 0} new subjects resolved${p.errors.length ? `, errors=${p.errors.length}` : ''}`)
-      for (const err of p.errors.slice(0, 3)) console.warn(`[cron] probly:`, err)
-    } catch (e) {
-      console.error('[cron] probly refresh failed:', (e as Error).message)
-    }
-  } catch (e) {
-    console.error('[cron] markets refresh failed:', (e as Error).message)
-  } finally {
-    running.markets = false
-  }
+    await refreshMarketTopics()
+  })
 }
-
-// Recompute source weight bonuses from the team's Approve/Reject decisions, so
-// scraping leans toward sources reviewers actually approve. Gentle + gated on a
-// minimum sample (see lib/feedback). Runs daily + once on startup.
-async function runApprovalFeedback() {
-  if (running.feedback) {
-    console.warn('[cron] approval feedback skipped — previous run still in progress')
-    return
-  }
-  running.feedback = true
-  try {
+async function rateNovelty() {
+  await guarded('novelty', async () => {
+    const { applyNovelty, CLUSTER_NOVELTY_DDL } = await import('@/lib/ai/novelty')
+    sqlite.exec(CLUSTER_NOVELTY_DDL)
+    const rows = sqlite.prepare(`SELECT id,canonical_headline headline,relevance_score baseScore FROM event_clusters
+      WHERE status='new' AND first_seen_at>? AND id NOT IN (SELECT cluster_id FROM cluster_novelty)
+      ORDER BY first_seen_at DESC LIMIT 120`).all(Date.now() - 4 * 3600_000) as { id: string; headline: string; baseScore: number }[]
+    await applyNovelty(rows)
+  })
+}
+export function startScheduler() {
+  if (started || process.env.SIGNALDESK_DISABLE_SCHEDULER === '1') return
+  started = true
+  // Recovery only for recent undelivered drafts; never replay historical cards.
+  sqlite.prepare(`INSERT OR IGNORE INTO delivery_outbox(post_id,available_at,created_at)
+    SELECT id,?,created_at FROM generated_posts WHERE status='pending' AND lark_sent_at IS NULL AND created_at>?`)
+    .run(Date.now(), Date.now() - 8 * 3600_000)
+  tasks.push(cron.schedule('*/5 * * * *', fetchNews))
+  tasks.push(cron.schedule('15 * * * * *', () => guarded('primary-fetch', async () => {
+    const { fetchAllSources } = await import('@/lib/news/fetcher')
+    await fetchAllSources(requestPipeline, true)
+  })))
+  tasks.push(cron.schedule('*/30 * * * * *', () => { requestPipeline(); void drainOutbox() }))
+  tasks.push(cron.schedule('7 * * * *', refreshMarkets))
+  tasks.push(cron.schedule('2-59/5 * * * *', rateNovelty))
+  tasks.push(cron.schedule('30 3 * * *', () => guarded('maintenance', async () => {
     const { recomputeSourceWeightBonus } = await import('@/lib/feedback')
-    const r = recomputeSourceWeightBonus()
-    console.log(`[cron] approval feedback: ${r.adjusted} source weight-bonus(es) set from ${r.sampled} sampled source(s)`)
-  } catch (e) {
-    console.error('[cron] approval feedback failed:', (e as Error).message)
-  } finally {
-    running.feedback = false
-  }
-}
-
-// Tracks the registered cron tasks so the shutdown handler can stop them
-// before closing the DB. Without this, an in-flight cron task could try to
-// write to a closed sqlite handle.
-const scheduledTasks: ReturnType<typeof cron.schedule>[] = []
-
-let shutdownRegistered = false
-
-function registerGracefulShutdown() {
-  if (shutdownRegistered) return
-  shutdownRegistered = true
-
-  let shuttingDown = false
-  const handle = (signal: NodeJS.Signals) => {
-    if (shuttingDown) return  // ignore repeat signals during shutdown
-    shuttingDown = true
-
-    console.log(`[shutdown] received ${signal}, stopping cron + checkpointing DB`)
-
-    // Stop scheduled cron tasks. Already-running task bodies finish naturally;
-    // the per-task `running` overlap guards prevent new ticks from stacking.
-    for (const task of scheduledTasks) {
-      try { task.stop() } catch (e) { console.error('[shutdown] task.stop failed:', e) }
-    }
-
-    // Checkpoint WAL into the main DB file then close. Without this, recent
-    // writes sit in the -wal sidecar; a deploy that copies only the main file
-    // (and a SIGKILL after a stuck SIGTERM) loses those writes.
-    try {
-      sqlite.pragma('wal_checkpoint(TRUNCATE)')
-      sqlite.close()
-      console.log('[shutdown] DB checkpointed and closed')
-    } catch (e) {
-      console.error('[shutdown] DB close failed:', e)
-    }
-
+    recomputeSourceWeightBonus()
+    sqlite.prepare('DELETE FROM audit_log WHERE created_at<?').run(Date.now() - 30 * 86400_000)
+    sqlite.prepare('DELETE FROM news_items WHERE ingested_at<? AND is_processed=1').run(Date.now() - 14 * 86400_000)
+    sqlite.prepare('DELETE FROM market_quotes WHERE observed_at<?').run(Date.now() - 7 * 86400_000)
+  })))
+  void refreshMarkets()
+  void fetchNews()
+  void import('@/lib/markets/feed').then(m => m.startMarketFeed())
+  void import('@/lib/news/social').then(m => m.startSocialStream())
+  const shutdown = async () => {
+    if (stopping) return
+    stopping = true
+    if (pipelineTimer) clearTimeout(pipelineTimer)
+    for (const task of tasks) task.stop()
+    const deadline = Date.now() + 25_000
+    while (running.size && Date.now() < deadline) await new Promise(r => setTimeout(r, 100))
+    // Do not close the DB under an in-flight callback/outbox. The OS closes it;
+    // SQLite WAL recovery and persisted leases resume interrupted work safely.
+    try { sqlite.pragma('wal_checkpoint(PASSIVE)') } catch { /* recovery on startup */ }
     process.exit(0)
   }
-
-  process.on('SIGTERM', handle)
-  process.on('SIGINT', handle)
-}
-
-export function startScheduler() {
-  if (started) return
-  started = true
-
-  scheduledTasks.push(cron.schedule('*/5 * * * *', runFetch))
-  scheduledTasks.push(cron.schedule('*/5 * * * *', runAutoGenerate))
-  scheduledTasks.push(cron.schedule('0 3 * * *', runPrune))  // daily 03:00 — prune audit_log & old processed items
-  scheduledTasks.push(cron.schedule('7 * * * *', runMarketsRefresh))  // hourly at :07 — keep market-relevance signal warm
-  // Run an immediate market refresh on startup so the scorer has data to
-  // boost against before the first hourly tick.
-  void runMarketsRefresh()
-
-  scheduledTasks.push(cron.schedule('30 3 * * *', runApprovalFeedback))  // daily 03:30 — learn from approvals
-  void runApprovalFeedback()
-
-  registerGracefulShutdown()
-
-  console.log('[cron] scheduler started — fetch every 5min, generate every 5min, prune daily 03:00')
+  process.once('SIGTERM', () => { void shutdown() })
+  process.once('SIGINT', () => { void shutdown() })
+  console.log('[cron] newsroom: streaming ingestion, 30s selection, durable delivery')
 }

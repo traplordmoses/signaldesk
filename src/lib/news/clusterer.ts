@@ -1,8 +1,9 @@
 import { db } from '@/lib/db'
 import { newsItems, eventClusters } from '@/lib/db/schema'
-import { eq, and, gt } from 'drizzle-orm'
+import { eq, and, gt, inArray, desc } from 'drizzle-orm'
 import { getTier1And2Keywords } from './scorer'
 import { extractTopics } from './tagger'
+import { materialChange } from './updates'
 
 // Word-boundary match — same fix as scorer.ts. .includes() would fire "doj" on
 // any string containing those chars; we'd cluster unrelated articles together.
@@ -208,7 +209,7 @@ export function shouldMergeIntoExisting(
   return keywordOverlap(candidateKeywords, existingKw) >= MERGE_KEYWORD_OVERLAP_THRESHOLD
 }
 
-export async function clusterNewItems(): Promise<number> {
+export async function clusterNewItems(options: { rateNovelty?: boolean } = {}): Promise<number> {
   const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000
 
   const unprocessed = db.select()
@@ -298,7 +299,7 @@ export async function clusterNewItems(): Promise<number> {
         // Measured on a real batch, on-topic share of the finance cluster:
         // single 11/17, seed-only 10/12, majority 9/9, with identical
         // consolidation of the duplicate story (3 clusters in every mode).
-        const curated = keywordOverlap(kwSets[i].keywords, kwSets[j].keywords) >= 2
+        const curated = false // generic category overlap is not event identity
         let linked = curated
         if (!linked) {
           let hits = 0
@@ -351,9 +352,11 @@ export async function clusterNewItems(): Promise<number> {
       const recentClusters = db.select()
         .from(eventClusters)
         .where(gt(eventClusters.firstSeenAt, mergeCutoff))
+        .orderBy(desc(eventClusters.firstSeenAt))
         .all()
 
       let mergedInto: typeof recentClusters[number] | null = null
+      let parentClusterId: string | null = null
       for (const existing of recentClusters) {
         let existingSummaries: string[] = []
         try { existingSummaries = JSON.parse(existing.constituentSummaries ?? '[]') } catch { /* keep [] */ }
@@ -368,10 +371,11 @@ export async function clusterNewItems(): Promise<number> {
         // the canonical headline keeps the test on what the cluster is ABOUT,
         // and matches the headline-to-headline data the thresholds were tuned on.
         if (
-          shouldMergeIntoExisting(candidateKw, existingText) ||
           sameStory(canonical.title, existing.canonicalHeadline, df, dfMax)
         ) {
-          mergedInto = existing
+          if ((existing.postCount ?? 0) > 0 && materialChange(canonical.title, existing.canonicalHeadline)) {
+            parentClusterId = existing.id
+          } else { mergedInto = existing }
           break
         }
       }
@@ -393,7 +397,9 @@ export async function clusterNewItems(): Promise<number> {
           .set({
             canonicalHeadline: newCanonical,
             relevanceScore: mergedScore,
-            sourceCount: mergedIds.length,
+            sourceCount: new Set(db.select({ sourceId: newsItems.sourceId }).from(newsItems).where(inArray(newsItems.id, mergedIds)).all().map(i => i.sourceId)).size,
+            riskLevel: mergedInto.riskLevel === 'high' || riskLevel === 'high' ? 'high' : mergedInto.riskLevel === 'medium' || riskLevel === 'medium' ? 'medium' : 'low',
+            riskReasons: JSON.stringify([...new Set([...JSON.parse(mergedInto.riskReasons ?? '[]'), ...uniqueReasons])]),
             constituentItemIds: JSON.stringify(mergedIds),
             constituentSummaries: JSON.stringify(mergedSums),
             lastUpdatedAt: now,
@@ -416,12 +422,13 @@ export async function clusterNewItems(): Promise<number> {
       try {
         db.insert(eventClusters).values({
           id: clusterId,
+          parentClusterId,
           canonicalHeadline: canonical.title,
           category,
           relevanceScore: maxScore,
           riskLevel,
           riskReasons: JSON.stringify(uniqueReasons),
-          sourceCount: clusterItems.length,
+          sourceCount: new Set(clusterItems.map(i => i.sourceId)).size,
           constituentItemIds: JSON.stringify(clusterItems.map(it => it.id)),
           constituentSummaries: JSON.stringify(summaries),
           topics: JSON.stringify(topics),
@@ -451,7 +458,7 @@ export async function clusterNewItems(): Promise<number> {
   // ones. Has to happen here rather than at selection — the candidate query
   // filters on relevance >= 6.5 first, so a bizarre story sitting at 1.5 would
   // never reach a selection-time bonus. Never throws; failure means no lift.
-  if (created.length > 0) {
+  if (created.length > 0 && options.rateNovelty !== false) {
     const { applyNovelty } = await import('@/lib/ai/novelty')
     const n = await applyNovelty(created)
     if (n.rated > 0 || n.errors.length > 0) {

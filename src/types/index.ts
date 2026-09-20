@@ -56,6 +56,9 @@ export interface GeneratedPost {
   scoreExplanation: string | null
   status: string | null
   rejectionReason: string | null
+  publishedUrl?: string | null
+  legalClearedBy?: string | null
+  legalClearedAt?: number | null
   postedAt: number | null
   reviewedBy: string | null
   larkMessageId: string | null

@@ -11,6 +11,8 @@
  */
 
 const LOW_SIGNAL_PATTERNS: RegExp[] = [
+  /\|\s*[A-Z][a-z]+\s+[A-Z][a-z]+/, // signed newspaper column
+  /\b(?:preview|betting tips|fantasy picks|how to watch)\b/i,
   // Personal-essay / column formats
   /\binterview with\b/i,
   /\bi spent\b/i,

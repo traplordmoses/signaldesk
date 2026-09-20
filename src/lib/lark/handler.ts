@@ -1,7 +1,9 @@
 import { db } from '@/lib/db'
 import { generatedPosts, eventClusters, auditLog, settings } from '@/lib/db/schema'
 import { eq } from 'drizzle-orm'
+import { recordReview, legalClear, approvalProblem } from '@/lib/editorial/review'
 import {
+  buildRejectReasons,
   updateGroupCard,
   updateReviewCardMode,
   buildReviewCard,
@@ -11,7 +13,7 @@ import {
 } from './messages'
 
 interface ActionValue {
-  action: 'approve' | 'reject' | 'save_edit' | 'show_edit' | 'cancel_edit' | 'pause_bot' | 'resume_bot'
+  action: string
   postId?: string
   editedContent?: string
 }
@@ -105,6 +107,29 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   const cluster = db.select().from(eventClusters).where(eq(eventClusters.id, post.clusterId)).get()
   if (!cluster) return { code: 1 }
 
+  if (actionType === 'reject') return { card: { type: 'raw', data: buildRejectReasons(postId) } }
+  if (actionType === 'legal_clear') {
+    try {
+      legalClear(postId, operator.open_id)
+      const refreshed = db.select().from(generatedPosts).where(eq(generatedPosts.id, postId)).get()!
+      const card = buildReviewCard(cluster, [refreshed])
+      await updateReviewCardMode(messageId, cluster, [refreshed])
+      return {toast:{type:'success',content:'Legal clearance recorded. Review and approve the draft.'},card:{type:'raw',data:card}}
+    } catch(e) { return {toast:{type:'error',content:String(e)}} }
+  }
+  if (actionType.startsWith('reject_')) {
+    try {
+      const rejected=recordReview(postId,'rejected',actorName,actionType.slice(7))
+      await updateGroupCard(messageId,cluster,rejected,actorName,false)
+      return {toast:{type:'info',content:'Rejection reason saved.'}}
+    } catch(e) {return {toast:{type:'error',content:String(e)}}}
+  }
+  if (actionType === 'approve') {
+    const problem=approvalProblem(post,cluster.riskLevel)
+    if(problem)return {toast:{type:'error',content:problem}}
+    if(post.status==='publishing')return {toast:{type:'info',content:'Publishing already started. Record its X URL in the dashboard.'}}
+  }
+
   // show_edit / cancel_edit — toggle the inline edit textbox without changing
   // any DB state. Returns the new card *inline* in the callback response —
   // Schema 2.0's preferred update mechanism. The earlier separate-PATCH-call
@@ -149,185 +174,29 @@ export async function handleLarkCallback(payload: CallbackPayload): Promise<{
   }
 
   if (actionType === 'approve') {
-    let landedIn: 'dm' | 'thread' | 'none' = 'none'
     try {
-      db.update(generatedPosts)
-        .set({ status: 'approved', reviewedBy: actorName, updatedAt: Date.now() })
-        .where(eq(generatedPosts.id, postId))
-        .run()
-
-      await updateGroupCard(messageId, cluster, post, actorName, true)
-
+      const approved = recordReview(postId, 'approved', actorName)
+      // Card patch failure must not swallow the publishing handoff.
+      try { await updateGroupCard(messageId, cluster, approved, actorName, true) }
+      catch (e) { console.error('[review] approval card patch failed', String(e)) }
       try {
-        await sendApprovalDM(operator.open_id, post)
-        landedIn = 'dm'
-      } catch (dmErr) {
-        console.warn(`approval DM failed (post=${postId}): ${(dmErr as Error).message} — falling back to thread reply`)
-        try {
-          db.insert(auditLog).values({
-            id: crypto.randomUUID(),
-            eventType: 'fallback',
-            entityType: 'generated_post',
-            entityId: postId,
-            errorCode: 'APPROVE_DM_FALLBACK',
-            errorMessage: (dmErr as Error).message,
-            createdAt: Date.now(),
-          }).run()
-        } catch (e) {
-          console.error(`audit log write failed (approve fallback, post=${postId}):`, e)
-        }
-        await sendApprovalThreadReply(messageId, post)
-        landedIn = 'thread'
+        await sendApprovalDM(operator.open_id, approved)
+        return {toast:{type:'success',content:'Approved. Check your DMs, then record the X post URL in the dashboard.'}}
+      } catch {
+        await sendApprovalThreadReply(messageId, approved)
+        return {toast:{type:'success',content:'Approved. Open the thread reply to publish.'}}
       }
-
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'post_approved',
-        entityType: 'generated_post',
-        entityId: postId,
-        actor: actorName,
-        details: JSON.stringify({
-          clusterId: cluster.id,
-          landedIn,
-          operatorOpenId: operator.open_id,
-          operatorName: operator.name ?? null,
-        }),
-        createdAt: Date.now(),
-      }).run()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'error',
-        entityType: 'generated_post',
-        entityId: postId,
-        errorCode: 'APPROVE_FAILED',
-        errorMessage: msg,
-        createdAt: Date.now(),
-      }).run()
+    } catch (e) {
+      console.error('[review] approval handoff failed', String(e))
+      return {toast:{type:'error',content:'Publishing handoff failed. Click Approve again to retry.'}}
     }
-
-    const toastContent =
-      landedIn === 'thread' ? 'Post approved! Open the thread reply to publish.'
-      : landedIn === 'dm'   ? 'Post approved! Check your DMs.'
-      :                       'Post approved!'
-    return { code: 0, toast: { type: 'success', content: toastContent } }
-  }
-
-  if (actionType === 'reject') {
-    try {
-      db.update(generatedPosts)
-        .set({ status: 'rejected', reviewedBy: actorName, updatedAt: Date.now() })
-        .where(eq(generatedPosts.id, postId))
-        .run()
-
-      await updateGroupCard(messageId, cluster, post, actorName, false)
-
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'post_rejected',
-        entityType: 'generated_post',
-        entityId: postId,
-        actor: actorName,
-        details: JSON.stringify({
-          clusterId: cluster.id,
-          operatorOpenId: operator.open_id,
-          operatorName: operator.name ?? null,
-        }),
-        createdAt: Date.now(),
-      }).run()
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'error',
-        entityType: 'generated_post',
-        entityId: postId,
-        errorCode: 'REJECT_FAILED',
-        errorMessage: msg,
-        createdAt: Date.now(),
-      }).run()
-    }
-
-    return { code: 0, toast: { type: 'info', content: 'Post rejected.' } }
   }
 
   // save_edit — submitted by the inline form on the review card. The route's
   // extractFormString pulls form_value.edited_content into action.value.editedContent
   // before this handler runs, so all we do here is validate, persist, and patch
   // the visible card.
-  if (actionType === 'save_edit') {
-    const editedContent = action.value.editedContent?.trim()
-    if (!editedContent) {
-      return { code: 1, toast: { type: 'error', content: 'Edited text cannot be empty.' } }
-    }
-    if (editedContent.length > 280) {
-      return { code: 1, toast: { type: 'error', content: `Edited text is ${editedContent.length}/280 characters.` } }
-    }
-    if (editedContent === post.content) {
-      return { code: 0, toast: { type: 'info', content: 'No changes to save.' } }
-    }
-
-    try {
-      db.update(generatedPosts)
-        .set({
-          content: editedContent,
-          charCount: editedContent.length,
-          reviewedBy: actorName,
-          updatedAt: Date.now(),
-        })
-        .where(eq(generatedPosts.id, postId))
-        .run()
-
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'post_edited',
-        entityType: 'generated_post',
-        entityId: postId,
-        actor: actorName,
-        details: JSON.stringify({
-          clusterId: cluster.id,
-          charCount: editedContent.length,
-          operatorOpenId: operator.open_id,
-          operatorName: operator.name ?? null,
-        }),
-        createdAt: Date.now(),
-      }).run()
-
-      // Two-pronged update: patchCard server-side (so the Approve button
-      // in the post-save read-only card is properly bound) + inline card
-      // response for immediate visual feedback. Same lesson as show_edit:
-      // inline alone leaves the next round of buttons un-bound.
-      const clusterPosts = db.select()
-        .from(generatedPosts)
-        .where(eq(generatedPosts.clusterId, cluster.id))
-        .all()
-      const card = buildReviewCard(cluster, clusterPosts)
-
-      try {
-        await updateReviewCardMode(messageId, cluster, clusterPosts)
-      } catch (err) {
-        console.error('[lark callback] save_edit patchCard failed (non-fatal):', (err as Error).message)
-      }
-
-      return {
-        toast: { type: 'success', content: 'Edit saved.' },
-        card: { type: 'raw', data: card },
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      db.insert(auditLog).values({
-        id: crypto.randomUUID(),
-        eventType: 'error',
-        entityType: 'generated_post',
-        entityId: postId,
-        errorCode: 'EDIT_SAVE_FAILED',
-        errorMessage: msg,
-        createdAt: Date.now(),
-      }).run()
-      return { code: 1, toast: { type: 'error', content: 'Could not save edit.' } }
-    }
-  }
+  if (actionType === 'save_edit') return {toast:{type:'error',content:'Use the review dashboard to edit and verify this draft.'}}
 
   return { code: 0 }
 }

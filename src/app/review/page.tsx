@@ -9,6 +9,8 @@ import type { GeneratedPost } from '@/types'
 const TABS = [
   { value: 'pending',  label: 'Pending' },
   { value: 'approved', label: 'Approved' },
+  { value: 'publishing', label: 'Publishing' },
+  { value: 'expired', label: 'Expired' },
   { value: 'posted',   label: 'Posted' },
   { value: 'rejected', label: 'Rejected' },
 ]
@@ -16,10 +18,12 @@ const TABS = [
 export default function ReviewPage() {
   const [tab, setTab] = useState('pending')
   const [posts, setPosts] = useState<GeneratedPost[]>([])
+  const [error,setError]=useState('')
+  const [metrics,setMetrics]=useState<{outcomes:{status:string;count:number}[];latencySeconds:{ingestToDraftP50:number|null;draftToApprovalP50:number|null}}|null>(null)
   const [loading, setLoading] = useState(true)
 
-  const loadPosts = useCallback(async (status: string) => {
-    setLoading(true)
+  const loadPosts = useCallback(async (status: string, background = false) => {
+    if (!background) setLoading(true)
     try {
       const res = await fetch(`/api/posts?status=${status}&limit=50`)
       const data = await res.json() as { posts: GeneratedPost[] }
@@ -30,42 +34,19 @@ export default function ReviewPage() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { loadPosts(tab) }, [tab, loadPosts])
+  useEffect(() => { loadPosts(tab); fetch('/api/newsroom').then(r=>r.ok?r.json():null).then(setMetrics).catch(()=>{}); const timer=setInterval(()=>{if (!['TEXTAREA','INPUT','SELECT'].includes(document.activeElement?.tagName??'')) void loadPosts(tab,true)},30_000);return()=>clearInterval(timer) }, [tab, loadPosts])
 
-  async function handleApprove(id: string) {
-    await fetch(`/api/posts/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'approved', reviewed_by: 'web' }),
-    })
+  async function updatePost(id:string,body:object) {
+    setError('')
+    const res=await fetch(`/api/posts/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    if(!res.ok){const data=await res.json();setError(data.error??'Update failed');return}
     await loadPosts(tab)
   }
 
-  async function handleReject(id: string, reason: string) {
-    await fetch(`/api/posts/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'rejected', rejection_reason: reason, reviewed_by: 'web' }),
-    })
-    await loadPosts(tab)
-  }
-
-  async function handleArchive(id: string) {
-    await fetch(`/api/posts/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: 'archived' }),
-    })
-    await loadPosts(tab)
-  }
-
-  async function handleContentSave(id: string, content: string) {
-    await fetch(`/api/posts/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    })
-  }
+  async function handleApprove(id:string) { await updatePost(id,{status:'approved'}) }
+  async function handleReject(id:string,reason:string) { await updatePost(id,{status:'rejected',rejection_reason:reason}) }
+  async function handleArchive(id:string) { await updatePost(id,{status:'archived'}) }
+  async function handleContentSave(id:string,content:string) { await updatePost(id,{content}) }
 
   async function handleCopyAndPost(id: string) {
     const postWindow = window.open('', '_blank')
@@ -81,7 +62,7 @@ export default function ReviewPage() {
       await loadPosts(tab)
     } catch (e) {
       postWindow?.close()
-      console.error(`copy/post failed (post=${id}):`, e)
+      setError(e instanceof Error?e.message:String(e))
     }
   }
 
@@ -92,6 +73,10 @@ export default function ReviewPage() {
         <a href="/" className="text-sm text-muted-foreground hover:text-foreground">← Dashboard</a>
       </div>
 
+      {error&&<p role="alert" className="text-red-600">{error}</p>}
+      {metrics&&<div className="rounded border p-3 text-sm">Last 7 days · {metrics.outcomes.map(o=>`${o.count} ${o.status}`).join(' · ')}<br/>
+        Median ingest → draft: {metrics.latencySeconds.ingestToDraftP50==null?'—':Math.round(metrics.latencySeconds.ingestToDraftP50/60)+'m'} · Median draft → approval: {metrics.latencySeconds.draftToApprovalP50==null?'—':Math.round(metrics.latencySeconds.draftToApprovalP50/60)+'m'}
+      </div>}
       <Tabs value={tab} onValueChange={v => { setTab(v); setPosts([]) }}>
         <TabsList>
           {TABS.map(t => (
@@ -110,10 +95,11 @@ export default function ReviewPage() {
                 <PostCard
                   key={post.id}
                   post={post}
+                  onChanged={()=>{void loadPosts(tab)}}
                   onApprove={t.value === 'pending' ? handleApprove : undefined}
                   onReject={t.value === 'pending' || t.value === 'approved' ? handleReject : undefined}
                   onArchive={t.value !== 'posted' ? handleArchive : undefined}
-                  onCopyAndPost={t.value === 'approved' ? handleCopyAndPost : undefined}
+                  onCopyAndPost={['approved','publishing'].includes(t.value) ? handleCopyAndPost : undefined}
                   onContentSave={t.value !== 'posted' ? handleContentSave : undefined}
                 />
               ))

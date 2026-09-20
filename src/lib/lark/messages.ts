@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto'
 import { larkPost, larkPatch } from './client'
-import { db } from '@/lib/db'
+import { db, sqlite } from '@/lib/db'
 import { newsItems } from '@/lib/db/schema'
 import { inArray } from 'drizzle-orm'
 import type { EventCluster, GeneratedPost } from '@/types'
@@ -12,7 +13,7 @@ import type { EventCluster, GeneratedPost } from '@/types'
 // callback handler (route.ts / handler.ts) is unchanged.
 
 const MODE_BADGES: Record<string, string> = {
-  pure_news:  '⚡ Breaking',
+  pure_news:  '📰 News',
   news_odds:  '📊 News + Odds',
   engagement: '💬 Engagement',
 }
@@ -104,7 +105,7 @@ function getClusterSources(cluster: EventCluster): { names: string[]; earliest: 
 
 // ====================== Card helpers (Schema 1.0) ======================
 
-interface ProblyRef { question: string; url: string; priceYes: number; league: string | null }
+interface ProblyRef { question: string; url: string; priceYes: number; league: string | null; fetchedAt?: number; matchReason?: string; matchType?: string }
 
 /** The Probly market recorded on a post's telemetry, if the generator found one. */
 function problyFromSignals(signals: string | null | undefined): ProblyRef | null {
@@ -200,7 +201,7 @@ export function buildReviewCard(
 
   const { names: sourceNames, earliest } = getClusterSources(cluster)
   const categoryLabel = CATEGORY_LABELS[cluster.category] ?? cluster.category
-  const timeAgo = formatTimeAgo(cluster.firstSeenAt)
+  const timeAgo = formatTimeAgo(earliest)
   const absTime = formatAbsTime(earliest)
 
   let topics: string[] = []
@@ -250,9 +251,20 @@ export function buildReviewCard(
     const market = problyFromSignals(post.signals)
     if (market) {
       const league = market.league ? `${market.league}  ·  ` : ''
-      const pct = Math.round(market.priceYes * 100)
-      elements.push(md(`📊 **Probly market:** ${league}${market.question}  ·  YES ${pct}%  ·  [open market](${market.url})`))
+      const quote = market.fetchedAt && Date.now()-market.fetchedAt<=60_000 ? `  ·  snapshot YES ${Math.round(market.priceYes*100)}% (${new Date(market.fetchedAt).toISOString().slice(11,16)} UTC)` : '  ·  check live price'
+      elements.push(md(`📊 **${market.matchType === 'direct' ? 'Matched' : 'Related'} Probly market:** ${league}${market.question}${quote}  ·  [open market](${market.url})`))
+      if (market.matchReason) elements.push(md(market.matchReason))
     }
+
+    try {
+      const signals = JSON.parse(post.signals ?? '{}')
+      if (signals.lane === 'urgent') elements.push(md('⚡ **URGENT — fresh development**'))
+      if (signals.evidence?.url) elements.push(md(`[Read original source](${signals.evidence.url})`))
+      if (signals.verification?.evidence?.length) elements.push(md(`**Supporting evidence:** ${signals.verification.evidence.join(' · ')}`))
+    } catch { /* legacy card */ }
+    if (cluster.riskLevel === 'high' && !post.legalClearedAt) {
+      elements.push(buttonRow(callbackButton({text:'Confirm legal clearance',action:'legal_clear',postId:post.id})))
+    } else if (post.legalClearedAt) elements.push(md('Legal clearance recorded for this draft.'))
 
     // Two actions, side by side. The X composer at the manual post step
     // is the edit surface for any wording tweaks.
@@ -297,6 +309,7 @@ function buildApprovalCard(post: GeneratedPost): object {
     elements: [
       md(displayContent),
       buttonRow(urlButton({ text: '🐦 Open X to post', url: intentUrl, type: 'primary' })),
+      buttonRow(urlButton({ text: 'Record published X URL', url: `${process.env.NEXT_PUBLIC_APP_URL ?? ''}/review`, type: 'default' })),
     ],
   })
 }
@@ -333,13 +346,14 @@ function buildEditedGroupCard(cluster: EventCluster, post: GeneratedPost, actorN
 
 // ====================== Send / Update ======================
 
-export async function sendClusterToLark(cluster: EventCluster, posts: GeneratedPost[]): Promise<string | null> {
+export async function sendClusterToLark(cluster: EventCluster, posts: GeneratedPost[], idempotencyKey?: string): Promise<string | null> {
   const chatId = process.env.LARK_REVIEW_CHAT_ID
   if (!chatId) throw new Error('LARK_REVIEW_CHAT_ID not set')
 
   const card = buildReviewCard(cluster, posts)
   const result = await larkPost('/im/v1/messages?receive_id_type=chat_id', {
     receive_id: chatId,
+    uuid: idempotencyKey,
     msg_type: 'interactive',
     content: JSON.stringify(card),
   })
@@ -395,6 +409,7 @@ export async function sendApprovalDM(openId: string, post: GeneratedPost): Promi
   const card = buildApprovalCard(post)
   await larkPost('/im/v1/messages?receive_id_type=open_id', {
     receive_id: openId,
+    uuid: createHash('sha256').update(`approval:${post.id}:${openId}`).digest('hex').slice(0,40),
     msg_type: 'interactive',
     content: JSON.stringify(card),
   })
@@ -407,6 +422,7 @@ export async function sendApprovalDM(openId: string, post: GeneratedPost): Promi
 export async function sendApprovalThreadReply(parentMessageId: string, post: GeneratedPost): Promise<void> {
   const card = buildApprovalCard(post)
   await larkPost(`/im/v1/messages/${parentMessageId}/reply`, {
+    uuid: createHash('sha256').update(`approval-thread:${post.id}`).digest('hex').slice(0,40),
     msg_type: 'interactive',
     content: JSON.stringify(card),
   })
@@ -421,4 +437,12 @@ export async function sendBotStatusToGroup(paused: boolean): Promise<void> {
     msg_type: 'interactive',
     content: JSON.stringify(card),
   })
+}
+
+export function buildRejectReasons(postId: string): object {
+  return card({title:'Why reject this draft?',template:'grey',elements:[
+    buttonRow(...[['stale','Too old'],['weak_story','Weak story'],['duplicate','Duplicate']].map(([reason,text]) => callbackButton({text,action:`reject_${reason}`,postId}))),
+    buttonRow(...[['wrong_market','Wrong market'],['inaccurate','Inaccurate'],['other','Other']].map(([reason,text]) => callbackButton({text,action:`reject_${reason}`,postId}))),
+    buttonRow(callbackButton({text:'Back',action:'cancel_edit',postId})),
+  ]})
 }

@@ -3,6 +3,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3'
 import * as schema from './schema'
 import path from 'path'
 import fs from 'fs'
+import { migrateNewsroom } from './newsroom'
 
 // DB_PATH should be set in production to a location OUTSIDE the project tree
 // (e.g. /var/lib/signaldesk/signaldesk.db). Reasons:
@@ -58,6 +59,8 @@ try { sqlite.exec('ALTER TABLE news_sources ADD COLUMN weight_bonus REAL DEFAULT
 // market-fit, mode) stored as JSON, so over time we can learn what the team
 // approves and tune scoring/selection from real outcomes. Idempotent ALTER.
 try { sqlite.exec('ALTER TABLE generated_posts ADD COLUMN signals TEXT') } catch { /* column already exists — fine */ }
+
+migrateNewsroom(sqlite)
 
 export const db = drizzle(sqlite, { schema })
 export { sqlite }

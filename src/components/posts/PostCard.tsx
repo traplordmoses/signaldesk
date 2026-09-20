@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { ReviewActions } from './ReviewActions'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,6 +11,7 @@ import type { GeneratedPost } from '@/types'
 
 interface Props {
   post: GeneratedPost
+  onChanged?: () => void
   onApprove?: (id: string) => Promise<void>
   onReject?: (id: string, reason: string) => Promise<void>
   onArchive?: (id: string) => Promise<void>
@@ -25,11 +27,13 @@ const MODE_STYLES: Record<string, { label: string; className: string }> = {
   engagement: { label: 'ENGAGEMENT',  className: 'bg-green-100 text-green-700' },
 }
 
-export function PostCard({ post, onApprove, onReject, onArchive, onCopyAndPost, onContentSave }: Props) {
+export function PostCard({ post, onChanged, onApprove, onReject, onArchive, onCopyAndPost, onContentSave }: Props) {
   const [content, setContent] = useState(post.content)
   const [saving, setSaving] = useState(false)
   const [acting, setActing] = useState(false)
 
+  useEffect(() => { setContent(post.content) }, [post.content])
+  const unsaved = saving || content !== post.content
   const charCount = content.length
   const isOverLimit = charCount > 280
   const mode = MODE_STYLES[post.contentMode] ?? { label: post.contentMode.toUpperCase(), className: 'bg-gray-100 text-gray-700' }
@@ -97,10 +101,10 @@ export function PostCard({ post, onApprove, onReject, onArchive, onCopyAndPost, 
 
         <div className="flex flex-wrap gap-2">
           {post.status === 'pending' && onApprove && (
-            <Button size="sm" onClick={handleApprove} disabled={acting || isOverLimit}>Approve</Button>
+            <Button size="sm" onClick={handleApprove} disabled={acting || unsaved || isOverLimit}>Approve</Button>
           )}
-          {post.status === 'approved' && onCopyAndPost && (
-            <Button size="sm" onClick={handleCopyAndPost} disabled={acting}>Copy & Post to X</Button>
+          {(post.status === 'approved' || post.status === 'publishing') && onCopyAndPost && (
+            <Button size="sm" onClick={handleCopyAndPost} disabled={acting || unsaved}>Copy & Post to X</Button>
           )}
           {(post.status === 'pending' || post.status === 'approved') && onReject && (
             <RejectButton postId={post.id} onReject={onReject} />
@@ -109,6 +113,7 @@ export function PostCard({ post, onApprove, onReject, onArchive, onCopyAndPost, 
             <Button size="sm" variant="ghost" onClick={handleArchive} disabled={acting}>Archive</Button>
           )}
         </div>
+        <ReviewActions post={post} onChanged={onChanged ?? (()=>{})}/>
       </CardContent>
     </Card>
   )
@@ -116,7 +121,7 @@ export function PostCard({ post, onApprove, onReject, onArchive, onCopyAndPost, 
 
 function RejectButton({ postId, onReject }: { postId: string; onReject: (id: string, reason: string) => Promise<void> }) {
   const [open, setOpen] = useState(false)
-  const [reason, setReason] = useState('')
+  const [reason, setReason] = useState('weak_story')
   const [submitting, setSubmitting] = useState(false)
 
   async function handleSubmit() {
@@ -125,7 +130,7 @@ function RejectButton({ postId, onReject }: { postId: string; onReject: (id: str
     try {
       await onReject(postId, reason.trim())
       setOpen(false)
-      setReason('')
+      setReason('weak_story')
     } finally {
       setSubmitting(false)
     }
@@ -140,13 +145,10 @@ function RejectButton({ postId, onReject }: { postId: string; onReject: (id: str
   return (
     <div className="w-full space-y-2 border border-destructive/30 rounded-md p-3 bg-destructive/5">
       <p className="text-xs font-medium text-destructive">Reason for rejection (required)</p>
-      <Textarea
-        value={reason}
-        onChange={e => setReason(e.target.value)}
-        placeholder="Explain why this post is being rejected…"
-        className="text-sm min-h-[60px]"
-        autoFocus
-      />
+      <select aria-label="Rejection reason" className="w-full rounded border p-2" value={reason} onChange={e=>setReason(e.target.value)}>
+        <option value="stale">Too old</option><option value="weak_story">Weak story</option><option value="duplicate">Duplicate</option>
+        <option value="wrong_market">Wrong market</option><option value="inaccurate">Inaccurate</option><option value="other">Other</option>
+      </select>
       <div className="flex gap-2">
         <Button
           size="sm"
@@ -156,7 +158,7 @@ function RejectButton({ postId, onReject }: { postId: string; onReject: (id: str
         >
           {submitting ? 'Rejecting…' : 'Confirm Reject'}
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => { setOpen(false); setReason('') }}>Cancel</Button>
+        <Button size="sm" variant="ghost" onClick={() => { setOpen(false); setReason('weak_story') }}>Cancel</Button>
       </div>
     </div>
   )
