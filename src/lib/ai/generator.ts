@@ -150,7 +150,7 @@ function validateAIResponse(raw: unknown): AIResponse {
   }
 }
 
-async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: ContentMode): Promise<AIResponse> {
+async function callClaude(cluster: Cluster, marketUrl: string, modeHint?: ContentMode, correction?: string): Promise<AIResponse> {
   const apiKey: string | undefined = process.env.ANTHROPIC_API_KEY
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set')
   // Narrowed binding so the inner closure can use it without TS widening back to string|undefined
@@ -192,7 +192,9 @@ Remember:
 - Never casualties or gore. Never name Polymarket or Kalshi ("Probly" is fine). No URLs. No em-dashes.
 - news_odds: same one-liner, but the fact is where the odds are moving — qualitative direction only, never invent a %.
 
-Now write one post.`
+Now write one post.` + (correction
+    ? `\n\nYOUR PREVIOUS DRAFT WAS REJECTED by the fact-checker: ${sanitizeForPrompt(correction, 300)}\nWrite it again using ONLY facts, names and numbers that appear in the Headline and Context above. Leave out anything you know from elsewhere, even if it is true.`
+    : '')
 
   // Reinforce the house style with the team's own recent picks (in-context
   // learning from approvals) — only when we have enough, else just the static
@@ -279,40 +281,62 @@ export async function generatePost(cluster: Cluster, modeHint?: ContentMode) {
   const lane = laneFor(evidence, probly != null, cluster.riskLevel)
 
   try {
-    const result = await callClaude(cluster, marketUrl || '(no live Probly market)', modeHint)
+    // Draft, shape and fact-check. On a fact-check rejection ONLY, re-draft once
+    // with the rejection reason in the prompt. The previous retry re-ran the same
+    // prompt and got the same mistake: Man City clusters on 2026-09-26/29 were
+    // rejected three times over for "unsupported numeric detail: 115" — the model
+    // kept adding the famous 115 from memory. The checker was right; the drafter
+    // needed telling. Verified on real sources: an Athletic explainer that states
+    // the verdict failed on every first draft and passed 3/3 with the reason fed
+    // back. Weak sources (an opinion column, a radio-show listing) are still
+    // dropped. A second rejection drops the draft, so nothing unsupported gets out.
+    const draftOnce = async (correction?: string) => {
+      const result = await callClaude(cluster, marketUrl || '(no live Probly market)', modeHint, correction)
 
-    // Force-strip ANY URL from ALL modes (tweets are text-only per marketing),
-    // and convert em/en dashes to a comma — they read as AI-written, and the
-    // prompt asks the model to avoid them, but this guarantees it. (Regular
-    // hyphens in "2-0", "by-election", "rate-hike" are left untouched.)
-    result.content = result.content
-      .replace(/https?:\/\/\S+/g, '')
-      .replace(/\s*[—–]\s*/g, ', ')
-      .replace(/\s+,/g, ',')
-      .replace(/,\s*,/g, ', ')
-      .replace(/\n+$/, '')
-      .trim()
+      // Force-strip ANY URL from ALL modes (tweets are text-only per marketing),
+      // and convert em/en dashes to a comma — they read as AI-written, and the
+      // prompt asks the model to avoid them, but this guarantees it. (Regular
+      // hyphens in "2-0", "by-election", "rate-hike" are left untouched.)
+      result.content = result.content
+        .replace(/https?:\/\/\S+/g, '')
+        .replace(/\s*[—–]\s*/g, ', ')
+        .replace(/\s+,/g, ',')
+        .replace(/,\s*,/g, ', ')
+        .replace(/\n+$/, '')
+        .trim()
 
-    // House shape: tag + label + ONE sentence. The prompt asks for it; this
-    // guarantees it, because the model drifts back toward the old context-line
-    // + prediction-hook form. engagement is deliberately exempt — that mode IS
-    // a stakes line plus a question, it's never auto-generated, and it only
-    // runs when a reviewer asks for it explicitly from /api/posts/generate.
-    //
-    // The dot is FORCED from the story's category rather than trusted from the
-    // model, so category colours are consistent instead of approximate.
-    if (result.content_mode !== 'engagement') {
-      const tag = tagForCategory(contentCategory, cluster.category)
-      const shaped = enforceOneLiner(result.content, tag)
-      if (shaped !== result.content) {
-        console.log(`[generate] shaped ${result.content.length}c -> ${shaped.length}c`)
+      // House shape: tag + label + ONE sentence. The prompt asks for it; this
+      // guarantees it, because the model drifts back toward the old context-line
+      // + prediction-hook form. engagement is deliberately exempt — that mode IS
+      // a stakes line plus a question, it's never auto-generated, and it only
+      // runs when a reviewer asks for it explicitly from /api/posts/generate.
+      //
+      // The dot is FORCED from the story's category rather than trusted from the
+      // model, so category colours are consistent instead of approximate.
+      if (result.content_mode !== 'engagement') {
+        const tag = tagForCategory(contentCategory, cluster.category)
+        const shaped = enforceOneLiner(result.content, tag)
+        if (shaped !== result.content) {
+          console.log(`[generate] shaped ${result.content.length}c -> ${shaped.length}c`)
+        }
+        result.content = shaped
       }
-      result.content = shaped
-    }
 
-    if (result.content_mode !== 'engagement' && !/\b(BREAKING|JUST IN|NEW|UPDATE|WARNING):/.test(result.content)) throw new Error('missing alert label')
-    result.content = applyFreshness(result.content, evidence, lane === 'urgent')
-    const verification = await verifyDraft(result.content, evidence)
+      if (result.content_mode !== 'engagement' && !/\b(BREAKING|JUST IN|NEW|UPDATE|WARNING):/.test(result.content)) throw new Error('missing alert label')
+      result.content = applyFreshness(result.content, evidence, lane === 'urgent')
+      const verification = await verifyDraft(result.content, evidence)
+      return { result, verification }
+    }
+    let drafted: Awaited<ReturnType<typeof draftOnce>>
+    try {
+      drafted = await draftOnce()
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e)
+      if (!/^(unsupported|source uncertainty)/.test(reason)) throw e
+      console.log(`[generate] fact-check rejected draft (${reason.slice(0, 80)}); one corrective retry`)
+      drafted = await draftOnce(reason)
+    }
+    const { result, verification } = drafted
 
     // char_count is the model's own estimate of the text it wrote. After
     // shaping it's stale, and it's what the Lark card and the dashboard show.
