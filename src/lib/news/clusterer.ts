@@ -106,6 +106,12 @@ const CAP_STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'but', 'for', 'of', 'in', 'on', 'at', 'to', 'with',
   'from', 'by', 'as', 'is', 'are', 'it', 'its', 'this', 'that', 'new', 'how',
   'why', 'what', 'when', 'says', 'said', 'after', 'over', 'his', 'her', 'their',
+  // Format labels outlets bolt onto headlines ("…: Report", "… – live"). They
+  // are capitalised but name nothing, and counted as entities they made two
+  // copies of one story look like different subjects.
+  'report', 'reports', 'live', 'latest', 'explained', 'analysis', 'watch',
+  'video', 'update', 'updates', 'breaking', 'exclusive', 'opinion', 'podcast',
+  'reaction', 'key', 'questions', 'answered',
 ])
 
 /**
@@ -133,8 +139,41 @@ export function properNouns(text: string): Set<string> {
   const cappedRest = rest.filter(w => /^[A-Z]/.test(w))
   if (rest.length > 0 && cappedRest.length / rest.length > 0.6) return new Set()
 
-  const capped = words.filter(w => /^[A-Z]/.test(w))
-  return new Set(capped.map(w => w.toLowerCase()).filter(w => !CAP_STOPWORDS.has(w)))
+  return new Set(entityWords(words))
+}
+
+/** Capitalised words, lowercased, possessives stripped, labels dropped — IN ORDER. */
+function entityWords(words: string[]): string[] {
+  return words
+    .filter(w => /^[A-Z]/.test(w))
+    // "League’s" / "City's" -> "league" / "city": a possessive is not a new entity.
+    .map(w => w.toLowerCase().replace(/['\u2019]s$/, '').replace(/['\u2019]$/, ''))
+    .filter(w => w.length > 0 && !CAP_STOPWORDS.has(w))
+}
+
+/**
+ * Does `noun` refer to something the other side also names? Exact match, or one
+ * of the two variant forms outlets use for the SAME entity:
+ *   - a clipped form: "man" ~ "manchester" (Man City / Manchester City)
+ *   - an acronym:     "pl"  ~ "premier league", "ucl" ~ "uefa champions league"
+ * Without these the guard read "Man City found guilty…" and "Manchester City
+ * found guilty…" as different subjects; on 2026-09-25 only 3 of 15 pairs of one
+ * story's coverage linked, and the Man City verdict split into ~60 clusters.
+ * Different clubs still diverge: "Man United" vs "Man City" differ on
+ * united/city, "Chinese steel" vs "Mexican avocado" on chinese/mexican.
+ */
+function entityCovered(noun: string, other: Set<string>, otherOrdered: string[]): boolean {
+  if (other.has(noun)) return true
+  for (const o of other) {
+    const [short, long] = noun.length <= o.length ? [noun, o] : [o, noun]
+    if (short.length >= 3 && long.startsWith(short)) return true
+  }
+  if (noun.length >= 2 && noun.length <= 5) {
+    for (let i = 0; i + noun.length <= otherOrdered.length; i++) {
+      if (otherOrdered.slice(i, i + noun.length).map(w => w[0]).join('') === noun) return true
+    }
+  }
+  return false
 }
 
 /** Token -> number of texts containing it. */
@@ -176,13 +215,19 @@ export function sameStory(
   const pa = properNouns(a)
   const pb = properNouns(b)
   if (pa.size > 0 && pb.size > 0) {
+    const oa = orderedEntities(a)
+    const ob = orderedEntities(b)
     let aOnly = false
     let bOnly = false
-    for (const w of pa) if (!pb.has(w)) { aOnly = true; break }
-    for (const w of pb) if (!pa.has(w)) { bOnly = true; break }
+    for (const w of pa) if (!entityCovered(w, pb, ob)) { aOnly = true; break }
+    for (const w of pb) if (!entityCovered(w, pa, oa)) { bOnly = true; break }
     if (aOnly && bOnly) return false
   }
   return true
+}
+
+function orderedEntities(text: string): string[] {
+  return entityWords(text.replace(/\([^)]*\)/g, ' ').split(/[^A-Za-z0-9\u2019']+/).filter(Boolean))
 }
 
 export function distinctivenessCutoff(batchSize: number): number {
