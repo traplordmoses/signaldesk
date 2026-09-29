@@ -86,8 +86,18 @@ export async function runAutoGenerate() {
       && !urgentPosts.some(p => p.createdAt > now - 60_000)
     const paced = routineDue(lastRoutine?.createdAt ?? null, config.postCooldownMinutes ?? 15, now)
     const candidates = db.select().from(eventClusters).where(and(eq(eventClusters.status, 'new'), eq(eventClusters.postCount, 0), gt(eventClusters.firstSeenAt, now - 6 * 3600_000))).all()
-    const { noveltyFor } = await import('@/lib/ai/novelty')
+    const { noveltyFor, magnitudeFor, magnitudeBonus, MAGNITUDE_BYPASS } = await import('@/lib/ai/novelty')
     const novelty = noveltyFor(candidates.map(c => c.id))
+    const magnitude = magnitudeFor(candidates.map(c => c.id))
+    // Built lazily: only on rounds where a slot is actually due and a candidate
+    // gets past the cheap filters, so the 30-second idle ticks never pay for it.
+    const { loadHeatIndex, heatBonus } = await import('@/lib/editorial/heat')
+    let heatIndex: ReturnType<typeof loadHeatIndex> | null = null
+    const heat = () => (heatIndex ??= loadHeatIndex(now))
+    const draftedRecently = recentPosts
+      .filter(p => p.createdAt > now - 6 * 3600_000)
+      .map(p => clusters.find(c => c.id === p.clusterId)?.canonicalHeadline)
+      .filter((h): h is string => !!h)
     const ranked = candidates.flatMap(c => {
       if (!isWorthyHeadline(c.canonicalHeadline)) {
         db.update(eventClusters).set({ status: 'low_signal_skipped' }).where(eq(eventClusters.id, c.id)).run()
@@ -99,7 +109,10 @@ export async function runAutoGenerate() {
       const match = problyMarketFor(c.canonicalHeadline, e.text, category)
       const lane = laneFor(e, match != null, c.riskLevel, now)
       if (lane === 'urgent' ? !urgentBudget : !paced) return []
-      if ((c.relevanceScore ?? 0) < (config.autoGenerateThreshold ?? 6.5) && lane !== 'urgent') return []
+      // A story rated magnitude 7+ competes even below the keyword-relevance gate:
+      // relevance measures category keywords and market fit, not importance.
+      const mag = magnitude.get(c.id)
+      if ((c.relevanceScore ?? 0) < (config.autoGenerateThreshold ?? 6.5) && lane !== 'urgent' && (mag ?? 0) < MAGNITUDE_BYPASS) return []
       // Routine generation cannot exhaust the last 10% of the daily budget reserved for urgent news.
       if (lane !== 'urgent' && recentPosts.length >= Math.floor(limit * .9)) return []
       if (!c.parentClusterId) {
@@ -114,8 +127,17 @@ export async function runAutoGenerate() {
       const bucket = bucketForCategory(category, c.category)
       const target = TARGET_MIX[bucket] ?? 0
       const actual = clusters.length ? (buckets.get(bucket) ?? 0) / clusters.length : target
+      // Magnitude (how big, per the model) and heat (how many outlets are running
+      // it) are what let a defining story beat the 10.0 filler that relevance
+      // can't tell it apart from. Both are withheld once the story has already
+      // been drafted in the last 6h — otherwise every other outlet's copy of the
+      // same verdict would win the next slots too. A cluster marked as a material
+      // update of a drafted story (parentClusterId) is a new development and keeps
+      // them.
+      const covered = !c.parentClusterId && draftedRecently.some(h => heat().sameStoryAs(h, c.canonicalHeadline))
+      const bigness = covered ? 0 : magnitudeBonus(mag) + heatBonus(heat().coverage(c.canonicalHeadline, c.id).outlets)
       const score = decayedScore(c.relevanceScore ?? 0, e.publishedAt, now) + 20 * (target - actual)
-        + (match ? 1.5 : 0) + ((novelty.get(c.id) ?? 0) >= 8 ? 1.5 : 0)
+        + (match ? 1.5 : 0) + ((novelty.get(c.id) ?? 0) >= 8 ? 1.5 : 0) + bigness
       return [{ c, score, lane, publishedAt: e.publishedAt }]
     }).sort((a,b) => Number(b.lane === 'urgent') - Number(a.lane === 'urgent') || b.score-a.score || b.publishedAt-a.publishedAt)
     const { generateSmartPosts } = await import('@/lib/ai/generator')

@@ -89,3 +89,42 @@ describe('applyNovelty', () => {
     expect(relevance('weird')).toBe(1.5)
   })
 })
+
+describe('magnitude', () => {
+  const reply = (scores: object[]) =>
+    new Response(JSON.stringify({ content: [{ text: JSON.stringify({ scores }) }] }), { status: 200 })
+  afterEach(() => vi.restoreAllMocks())
+
+  it('adds the magnitude column to a table created before it existed (production)', async () => {
+    const { ensureNoveltyTable } = await import('./novelty')
+    sqlite.exec('DROP TABLE IF EXISTS cluster_novelty')
+    sqlite.exec('CREATE TABLE cluster_novelty (cluster_id TEXT PRIMARY KEY, score REAL NOT NULL, scored_at INTEGER NOT NULL)')
+    sqlite.prepare('INSERT INTO cluster_novelty VALUES (?, ?, ?)').run('old-row', 6, Date.now())
+    ensureNoveltyTable()
+    const cols = (sqlite.prepare('PRAGMA table_info(cluster_novelty)').all() as { name: string }[]).map(c => c.name)
+    expect(cols).toContain('magnitude')
+    // existing ratings survive the migration
+    expect(noveltyFor(['old-row']).get('old-row')).toBe(6)
+  })
+
+  it('stores magnitude from the combined rating and reads it back', async () => {
+    const { magnitudeFor } = await import('./novelty')
+    process.env.ANTHROPIC_API_KEY = 'test-key'
+    sqlite.exec('CREATE TABLE IF NOT EXISTS event_clusters (id TEXT PRIMARY KEY, relevance_score REAL)')
+    sqlite.prepare('INSERT OR REPLACE INTO event_clusters (id, relevance_score) VALUES (?, ?)').run('verdict', 8.5)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply([{ id: 0, novelty: 7, magnitude: 9 }]))
+    await applyNovelty([{ id: 'verdict', headline: 'Manchester City found guilty on almost all Premier League charges', baseScore: 8.5 }])
+    expect(magnitudeFor(['verdict']).get('verdict')).toBe(9)
+    expect(noveltyFor(['verdict']).get('verdict')).toBe(7)
+  })
+
+  it('treats a missing or out-of-range magnitude as unknown, not zero', async () => {
+    const { magnitudeFor } = await import('./novelty')
+    process.env.ANTHROPIC_API_KEY = 'test-key'
+    sqlite.prepare('INSERT OR REPLACE INTO event_clusters (id, relevance_score) VALUES (?, ?)').run('odd', 5)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply([{ id: 0, novelty: 4, magnitude: 42 }]))
+    await applyNovelty([{ id: 'odd', headline: 'Something happened', baseScore: 5 }])
+    expect(magnitudeFor(['odd']).has('odd')).toBe(false)
+    expect(noveltyFor(['odd']).get('odd')).toBe(4)
+  })
+})
