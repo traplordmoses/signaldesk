@@ -24,6 +24,7 @@
  * requests, an identifying User-Agent, hourly.
  */
 import { sqlite } from '@/lib/db'
+import { messagesBody, responseText, stripFence } from '@/lib/ai/anthropic'
 
 const BASE = 'https://www.probly.com'
 
@@ -371,17 +372,14 @@ async function resolveBatch(items: { id: number; kind: 'subject' | 'market'; tex
     method: 'POST',
     signal: AbortSignal.timeout(30_000),
     headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5-20251001',
-      max_tokens: 4000,
-      temperature: 0,
-      system: ALIAS_PROMPT,
-      messages: [{ role: 'user', content: JSON.stringify(items.map(({ id, kind, text }) => ({ id, kind, text }))) }],
-    }),
+    body: JSON.stringify(messagesBody(process.env.ANTHROPIC_RATING_MODEL ?? process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5-20251001', {
+      system: ALIAS_PROMPT, maxTokens: 4000, temperature: 0,
+      user: JSON.stringify(items.map(({ id, kind, text }) => ({ id, kind, text }))),
+    })),
   })
   if (!res.ok) throw new Error(`alias resolution HTTP ${res.status}: ${(await res.text()).slice(0, 160)}`)
   const data = await res.json() as { content?: Array<{ text?: string }> }
-  const raw = (data.content?.[0]?.text ?? '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
+  const raw = stripFence(responseText(data))
   const parsed = JSON.parse(raw) as { results?: Array<{ id: number; aliases: unknown; concepts?: unknown }> }
   const out = new Map<number, { aliases: string[]; concepts: string[][] }>()
   for (const r of parsed.results ?? []) {

@@ -13,6 +13,7 @@ import { sensitiveStoriesAllowed } from '@/lib/policy'
 import { noveltyFor } from './novelty'
 import { bucketForCategory } from '@/lib/mix'
 import { enforceOneLiner, tagForCategory } from './shape'
+import { messagesBody, responseText, stripFence } from '@/lib/ai/anthropic'
 
 // Daily LLM-generation cost cap. Reads `daily_post_limit` from settings (default 20),
 // counts generated_posts in the last 24h, and blocks further generation when at/over.
@@ -208,13 +209,7 @@ Now write one post.`
       + approvedExamples.map(c => `"${c}"`).join('\n')
   }
 
-  const body = {
-    model,
-    max_tokens: 600,
-    temperature: 0.2,
-    system,
-    messages: [{ role: 'user', content: userPrompt }],
-  }
+  const body = messagesBody(model, { system, user: userPrompt, maxTokens: 600, temperature: 0.2 })
 
   async function doFetch(): Promise<Response> {
     return fetch('https://api.anthropic.com/v1/messages', {
@@ -249,7 +244,7 @@ Now write one post.`
   }
 
   const data = await res.json() as { content?: Array<{ text?: string }> }
-  const raw = data.content?.[0]?.text ?? ''
+  const raw = responseText(data)
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim()
   let parsed: unknown
   try { parsed = JSON.parse(cleaned) } catch (e) {

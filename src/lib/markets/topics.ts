@@ -16,13 +16,14 @@ import { marketTopics } from '../db/schema'
 import { eq } from 'drizzle-orm'
 import type { RawMarket as PolyMarket } from './polymarket'
 import type { RawMarket as KalshiMarket } from './kalshi'
+import { messagesBody, responseText, stripFence } from '@/lib/ai/anthropic'
 
 type RawMarket = PolyMarket | KalshiMarket
 
 // Calls the Anthropic API via raw fetch — same pattern as ai/generator.ts.
 // Avoids the SDK dependency so the bundle stays slim.
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
-const MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001'
+const MODEL = process.env.ANTHROPIC_RATING_MODEL ?? process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5-20251001'
 
 const TOPIC_PROMPT = `You extract canonical topics and matchable entities from prediction-market questions.
 
@@ -98,12 +99,7 @@ async function extractTopic(question: string): Promise<ExtractedTopic | null> {
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 300,
-        system: TOPIC_PROMPT,
-        messages: [{ role: 'user', content: question }],
-      }),
+      body: JSON.stringify(messagesBody(MODEL, { system: TOPIC_PROMPT, user: question, maxTokens: 300, temperature: 0 })),
     })
     if (!res.ok) {
       const body = await res.text().catch(() => '')
@@ -111,9 +107,9 @@ async function extractTopic(question: string): Promise<ExtractedTopic | null> {
       return null
     }
     const data = await res.json() as { content?: Array<{ type?: string; text?: string }> }
-    const block = data.content?.[0]
-    if (!block || block.type !== 'text' || !block.text) return null
-    const cleaned = block.text.trim().replace(/^```(?:json)?\s*/, '').replace(/```\s*$/, '')
+    const text = responseText(data)
+    if (!text) return null
+    const cleaned = stripFence(text)
     const parsed: unknown = JSON.parse(cleaned)
     if (!isExtractedTopic(parsed)) return null
     // Normalize entities to lowercase, strip empties.
