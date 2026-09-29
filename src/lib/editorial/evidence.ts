@@ -29,9 +29,20 @@ export function freshnessLabel(e: Pick<Evidence, 'publishedAt' | 'timestampKnown
 }
 
 /** Fast deterministic support gate. A second semantic verifier handles claim meaning. */
+/**
+ * Every number in a string, as canonical values. No word boundaries: "$20B",
+ * "$5.7M" and "F-47" must yield 20, 5.7 and 47. With \b…\b the "20" inside
+ * "20B" never counted as being in the source, so a faithful "$20 billion" draft
+ * was rejected as an "unsupported numeric detail" — both Haiku and Opus hit it
+ * on a real Boeing headline. Values are canonicalised so "09" matches "9".
+ */
+function numbersIn(text: string): string[] {
+  return (text.replace(/,/g, '').match(/\d+(?:\.\d+)?/g) ?? []).map(n => String(Number(n)))
+}
+
 export function checkFactualSupport(content: string, evidence: string): void {
-  const numbers = new Set(evidence.replace(/,/g, '').match(/\b\d+(?:\.\d+)?\b/g) ?? [])
-  for (const n of content.replace(/,/g, '').match(/\b\d+(?:\.\d+)?\b/g) ?? []) {
+  const numbers = new Set(numbersIn(evidence))
+  for (const n of numbersIn(content)) {
     if (!numbers.has(n)) throw new Error(`unsupported numeric detail: ${n}`)
   }
   for (const qualifier of ['allegedly', 'reportedly']) {

@@ -291,24 +291,21 @@ export async function syncDefaultSources() {
   // on existing DBs so operator tuning survives, so editing these only affects a
   // fresh install; change a running deployment from the dashboard or /api/settings.
   //
-  // Cadence targets ~80 posts/day, and the COOLDOWN is what delivers it: at 15
-  // min between posts the ceiling is 96/day (1440/15). At 20 min it held a flat
-  // ~57/day for a week. Supply is not the binding constraint — hundreds of
-  // clusters sit above the 6.5 gate — so pacing is the only thing setting output.
-  // daily_post_limit is only a runaway guard on LLM spend.
-  //
-  // It must sit ABOVE the cooldown-implied rate. isOverDailyLimit() is a hard
-  // stop over a ROLLING 24h window, not a per-calendar-day allowance, so a limit
-  // at or below the natural rate binds permanently: generation stops and does
-  // not resume until enough posts age out of the window. Setting it to 30 (the
-  // target) rather than above 32 (the ceiling) silenced production for hours.
+  // Cadence targets ~30 posts/day, set 2026-09-30 from review data rather than
+  // aspiration. Approvals per DAY peaked at 29-57 drafts/day (4.6-4.9 approved)
+  // and collapsed as volume rose: ~90/day produced 6 approvals in 10 days, 863
+  // expired. The team reviews a roughly fixed number, so extra drafts are wasted
+  // attention; magnitude/heat selection now puts the best stories in the slots
+  // that remain. The COOLDOWN sets the rate (1440/45 = 32/day). The urgent lane
+  // bypasses it but fires 0-3 times a day. daily_post_limit is only a runaway
+  // guard and must stay above the rolling-24h count, or generation stops.
   db.insert(settings)
     .values({
       id: 'singleton',
       platformName: 'SignalDesk',
       marketBaseUrl: 'https://yourplatform.com/markets',
       autoGenerateThreshold: 6.5,
-      postCooldownMinutes: 15,
+      postCooldownMinutes: 45,
       dailyPostLimit: 130,
       larkEnabled: 1,
       updatedAt: Date.now(),

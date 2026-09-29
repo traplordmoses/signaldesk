@@ -77,3 +77,22 @@ describe('verifyDraft', () => {
     expect(spy).not.toHaveBeenCalled()
   })
 })
+
+describe('deterministic number check', () => {
+  it('accepts "$20 billion" when the source says "$20B" (real Boeing headline)', async () => {
+    const { checkFactualSupport } = await import('./evidence')
+    expect(() => checkFactualSupport('Boeing won a $20 billion Navy contract.', "Boeing nabs $20B contract for Navy's futuristic fighter")).not.toThrow()
+    expect(() => checkFactualSupport('Hackers stole $351.6 million.', 'Hackers steal $351.6M in Bitget exchange hack')).not.toThrow()
+  })
+
+  it('still rejects a number the source does not contain', async () => {
+    const { checkFactualSupport } = await import('./evidence')
+    expect(() => checkFactualSupport('Boeing won a $30 billion Navy contract.', "Boeing nabs $20B contract for Navy's futuristic fighter")).toThrow('unsupported numeric detail: 30')
+    expect(() => checkFactualSupport('Man City were found guilty on 115 charges.', 'Premier League confirm Man City guilty of all charges')).toThrow('unsupported numeric detail: 115')
+  })
+
+  it('treats "09" and "9" as the same value', async () => {
+    const { checkFactualSupport } = await import('./evidence')
+    expect(() => checkFactualSupport('The match is on 9 October.', 'Kick-off 09 October')).not.toThrow()
+  })
+})
